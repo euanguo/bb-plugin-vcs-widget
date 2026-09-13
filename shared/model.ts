@@ -941,3 +941,43 @@ export function hasUncommittedChanges(overview: Overview): boolean {
   const tree = overview.workingTree;
   return tree.staged + tree.unstaged + tree.conflicted > 0;
 }
+
+/**
+ * The working tree in the CLI's words: "clean", or the parts that are not.
+ * `bb vcs-widget` prints it as a row and the composer banner hangs it off its
+ * count, so the two describe a repository the same way.
+ */
+export function workingTreeSummary(tree: Overview["workingTree"]): string {
+  const parts = [
+    tree.staged > 0 ? `${tree.staged} staged` : null,
+    tree.unstaged > 0 ? `${tree.unstaged} unstaged` : null,
+    tree.untracked > 0 ? `${tree.untracked} untracked` : null,
+    tree.conflicted > 0 ? `${tree.conflicted} conflicted` : null,
+  ].filter((part): part is string => part !== null);
+  return parts.length === 0 ? "clean" : parts.join(", ");
+}
+
+/** What the composer banner says above the message box. */
+export interface CommitBanner {
+  /** The branch, or the short sha when HEAD is detached. */
+  branch: string;
+  /** Files there are to commit. */
+  count: number;
+  /** The breakdown behind the count, for the hover. */
+  detail: string;
+}
+
+/**
+ * What to show above the composer, or null when there is nothing to hand an
+ * agent: no overview yet, no usable worktree, or a clean tree. Untracked
+ * files count here, because a new file is something to commit —
+ * `hasUncommittedChanges` leaves them out because a checkout does not
+ * trample them.
+ */
+export function commitBannerFor(overview: Overview | null): CommitBanner | null {
+  if (overview === null || overview.unavailableReason !== null) return null;
+  const tree = overview.workingTree;
+  const count = tree.staged + tree.unstaged + tree.untracked + tree.conflicted;
+  if (count === 0) return null;
+  return { branch: headLabel(overview, null), count, detail: workingTreeSummary(tree) };
+}

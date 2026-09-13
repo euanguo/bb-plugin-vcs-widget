@@ -57,6 +57,9 @@ one is a dialog this plugin does not have.
 | Agent Commit | no git at all: it sends "LGTM - Commit" to this thread's agent |
 | Agent Commit & Push | no git at all: it sends "LGTM - Commit & Push" to this thread's agent |
 
+The last two are also on the strip above the message box, where they run the
+same thing: no git.
+
 The checkbox is the staged state and Commit commits the index, never a path
 list, so the list is exactly what the commit will contain. `--literal-pathspecs`
 means a path from `git status` can never turn into a glob or pathspec magic.

@@ -2,6 +2,7 @@
 import { loadPluginApp, renderSlot, type CapturedPluginApp } from "@get-bb/plugin-sdk/testing/app";
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toast } from "sonner";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 afterEach(() => {
@@ -1273,5 +1274,88 @@ describe("settings sections", () => {
     await user.click(slot.getByRole("button", { name: "Clear" }));
     expect(await slot.findByText(/No favourites yet/u)).toBeTruthy();
     expect(slot.inspection.rpcCalls.at(-1)).toMatchObject({ method: "clearFavourites", input: { hostId: "h1", repoRoot: "/repo" } });
+  });
+});
+
+describe("composer banner", () => {
+  const banner = () => app.composerCustomizations[0]!.banners![0]!;
+
+  function renderBanner(options: { overview?: Overview; environment?: { id: string; branchName: string } | null; rpc?: Partial<Rpc> } = {}) {
+    const view = options.overview ?? overview({ workingTree: { staged: 1, unstaged: 0, untracked: 2, conflicted: 0 } });
+    return renderSlot<Record<string, never>, typeof rpcContract>(
+      banner(),
+      {},
+      {
+        composer: { scope: { kind: "thread", threadId: "t1" } },
+        sidebarThreads: sidebarThread(options.environment === undefined ? { id: "env1", branchName: "main" } : options.environment),
+        rpc: { overview: () => view, sendToAgent: () => ({ ok: true, delivery: "sent" }), ...options.rpc } as never,
+      },
+    );
+  }
+
+  const calls = (slot: { inspection: { rpcCalls: { method: string; input: unknown }[] } }, method: string) =>
+    slot.inspection.rpcCalls.filter((call) => call.method === method).map((call) => call.input);
+
+  it("only takes over a thread's composer", () => {
+    expect(app.composerCustomizations).toHaveLength(1);
+    expect(app.composerCustomizations[0]!.scopes).toEqual(["thread"]);
+  });
+
+  it("says where you are and how much there is, counting untracked files", async () => {
+    const slot = renderBanner();
+    expect(await slot.findByTestId("vcs-composer-banner")).toBeTruthy();
+    expect(slot.getByText("main")).toBeTruthy();
+    // A new file is something to commit, so the count is not the one a
+    // checkout would ask about.
+    expect(slot.getByText("3 to commit")).toBeTruthy();
+    expect(slot.getByTitle("1 staged, 2 untracked")).toBeTruthy();
+  });
+
+  it("stays off a clean tree, having read it", async () => {
+    const slot = renderBanner({ overview: overview() });
+    await waitFor(() => expect(calls(slot, "overview")).toEqual([{ threadId: "t1" }]));
+    expect(screen.queryByTestId("vcs-composer-banner")).toBeNull();
+  });
+
+  it("reads nothing on a thread with no environment", async () => {
+    const slot = renderBanner({ environment: null });
+    // The overview read goes out with the mount effect, so one flush is enough
+    // to catch it.
+    await act(async () => {});
+    expect(slot.inspection.rpcCalls).toEqual([]);
+    expect(screen.queryByTestId("vcs-composer-banner")).toBeNull();
+  });
+
+  it("sends both agent actions, and quotes what went rather than the button", async () => {
+    const user = userEvent.setup();
+    const sent = vi.spyOn(toast, "success").mockImplementation(() => "");
+    const slot = renderBanner({ rpc: { sendToAgent: () => ({ ok: true, delivery: "queued" }) } });
+    const commit = (await slot.findByTestId("vcs-composer-commit-button")) as HTMLButtonElement;
+    expect(commit.textContent).toBe("Agent Commit");
+    await user.click(commit);
+    await waitFor(() => expect(calls(slot, "sendToAgent")).toEqual([{ threadId: "t1", variant: "commit" }]));
+    expect(sent.mock.calls.at(-1)?.[0]).toContain("LGTM - Commit");
+    expect(sent.mock.calls.at(-1)?.[0]).toContain("queued");
+
+    const push = slot.getByTestId("vcs-composer-commit-push-button") as HTMLButtonElement;
+    expect(push.textContent).toBe("Agent Commit & Push");
+    await user.click(push);
+    await waitFor(() =>
+      expect(calls(slot, "sendToAgent")).toEqual([
+        { threadId: "t1", variant: "commit" },
+        { threadId: "t1", variant: "commit-push" },
+      ]),
+    );
+    expect(sent.mock.calls.at(-1)?.[0]).toContain("LGTM - Commit & Push");
+  });
+
+  it("reports an agent it could not reach", async () => {
+    const user = userEvent.setup();
+    const failed = vi.spyOn(toast, "error").mockImplementation(() => "");
+    const slot = renderBanner({
+      rpc: { sendToAgent: () => ({ ok: false, error: { code: "git_failed", message: "The message did not reach the agent: no such thread" } }) },
+    });
+    await user.click(await slot.findByTestId("vcs-composer-commit-button"));
+    await waitFor(() => expect(failed.mock.calls.at(-1)?.[0]).toContain("did not reach the agent"));
   });
 });

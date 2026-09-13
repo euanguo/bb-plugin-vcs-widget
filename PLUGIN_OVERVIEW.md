@@ -19,7 +19,9 @@ IntelliJ-style VCS popup, commit dialog and log, inside bb.
   first.
 - Agent Commit and Agent Commit & Push, which run no git: they hand the
   commit to the agent in the thread, so the agent that wrote the code writes
-  the message.
+  the message. They sit in the commit dialog and on a strip above the message
+  box, which appears only while there is something to commit and names the
+  branch and the count.
 - A git log as a panel tab: virtualised rows with each commit's refs as
   badges, a branch and a message filter, a drawer with the files a commit
   changed and their diffs, and a context menu with Checkout Revision, New

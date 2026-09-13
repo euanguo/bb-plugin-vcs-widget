@@ -97,7 +97,12 @@ app.tsx (browser) --useRpc(rpcContract, keyed by threadId)--> server.ts (bb serv
   log). `bb.cli.register` and `bb.agents.registerTool("vcs_widget_status")`
   both go through it, which is what keeps them read-only — the module names
   no mutating host method. `skills/vcs-widget/SKILL.md` tells agents the same.
-- `app.tsx` registers `experimental_threadHeaderAction`, four
+- `app.tsx` registers `experimental_threadHeaderAction`, one
+  `composer.customize` banner (`views/ComposerBanner.tsx`: the branch, the
+  count and the two agent buttons above the message box, scoped to `thread`
+  composers, hidden unless `commitBannerFor` finds something to commit --
+  the one surface that reads the repository unasked, because it must know
+  before it can decide to show), four
   `threadPanelAction` tabs (`compare`, `diff` in `views/panels.tsx`; `commit`
   in `views/CommitPanel.tsx`; `log` in `views/LogPanel.tsx`, the last two
   opened by their popup quick action and by a palette row without the popup;
@@ -134,9 +139,12 @@ bb plugin reload vcs-widget   # after `bb plugin build` without `dev`
 Live click-through: `docs/VERIFY.md`, driven by `scripts/live-check.mjs`
 (M1), `scripts/live-check-m2.mjs` (M2), `scripts/live-check-m3.mjs` (M3),
 `scripts/live-check-m4.mjs` (M4), `scripts/live-check-m5.mjs` (M5: the
-CLI, the settings sections, a 390 px pass) and `scripts/live-check-m6.mjs`
+CLI, the settings sections, a 390 px pass), `scripts/live-check-m6.mjs`
 (the commit panel's file menu, group discard and LGTM - Commit, which sends
-a real message to the thread) on `scripts/live-lib.mjs` (system
+a real message to the thread) and `scripts/live-check-m7.mjs` (the composer
+banner appearing on the watch, its count and its buttons; it never clicks
+them, because this banner only exists over a dirty tree) on
+`scripts/live-lib.mjs` (system
 Chromium + puppeteer-core against `$BB_SERVER_URL`; fixture content must be
 unique per run, the scratch repo is reused). `scripts/screenshots.mjs`
 regenerates `docs/screenshots/popup.png`, the only shot it still takes; with

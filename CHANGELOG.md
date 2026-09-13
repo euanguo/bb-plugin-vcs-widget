@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- The two agent buttons are out of the commit panel as well as in it: a strip
+  above the message box carries Agent Commit and Agent Commit & Push, with the
+  branch and how many files there are to commit, and the breakdown on the
+  count's hover. It shows only while there is something to commit and goes
+  away when the tree is clean, so handing the commit back to the agent no
+  longer means opening a panel first. Both buttons take the same `sendToAgent`
+  route the panel's do, so the two fixed lines in `AGENT_ACTIONS` are still
+  the whole of what the plugin can say to an agent ([SAFETY.md](docs/SAFETY.md)).
+  It reads the repository without being asked, which the popup never did: it
+  has to know whether there is anything to commit before it can decide to
+  show. A thread bb has no environment for is not read.
+
 ## 0.7.0 (2026-09-10)
 
 Three small ones off the backlog: what the popup remembers, what the watcher

@@ -57,6 +57,11 @@ bb plugin install https://github.com/CostaFot/bb-plugin-vcs-widget --yes
   "LGTM - Commit & Push" to the thread as if you had typed it, so the agent that
   wrote the code writes the message.
 
+## Above the message box
+
+The same two buttons, with the branch and the count, on a strip above the
+message box whenever there is something to commit.
+
 ## Git log
 
 <img src="docs/screenshots/log-combo.png" alt="The git log panel with a commit selected, and the right-click menu on a commit" width="720">

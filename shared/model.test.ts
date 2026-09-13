@@ -3,6 +3,7 @@ import type { ChangeEntry, LocalBranch, LogCommit, Overview, RemoteBranch } from
 import { unavailableOverview } from "../contracts";
 import {
   blockingReason,
+  commitBannerFor,
   commitMenuFor,
   confirmTierFor,
   diffSidesFor,
@@ -19,6 +20,7 @@ import {
   gitCommandPreview,
   gitCommandsPreview,
   groupBranches,
+  hasUncommittedChanges,
   headLabel,
   matchScore,
   menuFor,
@@ -26,6 +28,7 @@ import {
   quickActionsFor,
   trackedOptionsFor,
   withLease,
+  workingTreeSummary,
   worktreePathFor,
 } from "./model";
 
@@ -541,5 +544,40 @@ describe("commitMenuFor", () => {
     const busy = commitMenuFor(commit(), overview({ indexLocked: true }));
     expect(item(busy, "cherry-pick")?.disabled).toBe(true);
     expect(item(busy, "copy-hash")?.disabled).toBe(false);
+  });
+});
+
+describe("workingTreeSummary / commitBannerFor", () => {
+  it("names only the parts that are not clean", () => {
+    expect(workingTreeSummary({ staged: 0, unstaged: 0, untracked: 0, conflicted: 0 })).toBe("clean");
+    expect(workingTreeSummary({ staged: 1, unstaged: 2, untracked: 0, conflicted: 0 })).toBe("1 staged, 2 unstaged");
+    expect(workingTreeSummary({ staged: 0, unstaged: 0, untracked: 3, conflicted: 1 })).toBe("3 untracked, 1 conflicted");
+  });
+
+  it("stays hidden with nothing to commit", () => {
+    expect(commitBannerFor(null)).toBeNull();
+    expect(commitBannerFor(unavailableOverview("no worktree"))).toBeNull();
+    expect(commitBannerFor(overview())).toBeNull();
+  });
+
+  it("counts untracked files, which hasUncommittedChanges leaves out", () => {
+    const tree = { staged: 0, unstaged: 0, untracked: 2, conflicted: 0 };
+    expect(hasUncommittedChanges(overview({ workingTree: tree }))).toBe(false);
+    expect(commitBannerFor(overview({ workingTree: tree }))).toEqual({
+      branch: "main",
+      count: 2,
+      detail: "2 untracked",
+    });
+  });
+
+  it("reads the branch the way the header does", () => {
+    const tree = { staged: 1, unstaged: 1, untracked: 0, conflicted: 1 };
+    expect(commitBannerFor(overview({ workingTree: tree }))).toEqual({
+      branch: "main",
+      count: 3,
+      detail: "1 staged, 1 unstaged, 1 conflicted",
+    });
+    const detached = overview({ workingTree: tree, head: { kind: "detached", sha: "abc1234def" } });
+    expect(commitBannerFor(detached)?.branch).toBe("abc1234");
   });
 });

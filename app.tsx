@@ -1,14 +1,16 @@
 // VCS Widget frontend: a branch button in every thread header that opens the
-// Git branches popup, command palette rows that open it or run one of its
-// quick actions, four side-panel tabs (compare branches and diff with the
-// working tree from the context menu, the commit dialog and the log), and two
-// blocks on the plugin's settings page.
+// Git branches popup, a banner above the composer that hands the commit to
+// the agent, command palette rows that open the popup or run one of its quick
+// actions, four side-panel tabs (compare branches and diff with the working
+// tree from the context menu, the commit dialog and the log), and two blocks
+// on the plugin's settings page.
 import { definePluginApp } from "@get-bb/plugin-sdk/app";
 import { requestOpen } from "./lib/events";
 import type { QuickActionId } from "./shared/model";
 import { PANEL_ACTION } from "./shared/panel-params";
 import { BranchButton } from "./views/BranchButton";
 import { CommitPanel } from "./views/CommitPanel";
+import { ComposerBanner } from "./views/ComposerBanner";
 import { LogPanel } from "./views/LogPanel";
 import { ComparePanel, DiffPanel } from "./views/panels";
 import { AgentAccessSection, FavouritesSection } from "./views/SettingsSections";
@@ -62,6 +64,14 @@ export default definePluginApp((app) => {
     icon: "Clock",
     component: LogPanel,
     layout: "flush",
+  });
+
+  // Only a thread composer: a side chat or the new-thread box has no worktree
+  // of ours to commit.
+  app.composer.customize({
+    id: "agent-commit",
+    scopes: ["thread"],
+    banners: [{ id: "agent-commit", chrome: "card", component: ComposerBanner }],
   });
 
   app.slots.settingsSection({

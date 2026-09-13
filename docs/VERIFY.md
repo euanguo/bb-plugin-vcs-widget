@@ -7,8 +7,9 @@ host, and the app under jsdom. This document is the click-through against a
 running bb: `scripts/live-check.mjs` for milestone 1, `scripts/live-check-m2.mjs`
 for milestone 2, `scripts/live-check-m3.mjs` for milestone 3,
 `scripts/live-check-m4.mjs` for milestone 4, `scripts/live-check-m5.mjs` for
-milestone 5 and `scripts/live-check-m6.mjs` for the commit panel's later
-additions, all on `scripts/live-lib.mjs`.
+milestone 5, `scripts/live-check-m6.mjs` for the commit panel's later
+additions and `scripts/live-check-m7.mjs` for the strip above the message
+box, all on `scripts/live-lib.mjs`.
 
 ## Setup
 
@@ -46,6 +47,8 @@ VCS_E2E_THREAD=thr_xxx VCS_E2E_PROJECT=proj_xxx \
   node scripts/live-check-m5.mjs /tmp/vcs-scratch
 VCS_E2E_THREAD=thr_xxx VCS_E2E_PROJECT=proj_xxx \
   node scripts/live-check-m6.mjs /tmp/vcs-scratch
+VCS_E2E_THREAD=thr_xxx VCS_E2E_PROJECT=proj_xxx \
+  node scripts/live-check-m7.mjs /tmp/vcs-scratch
 ```
 
 Milestone 6 sends a real "LGTM - Commit" to `VCS_E2E_THREAD`, which starts a
@@ -294,6 +297,28 @@ Manual, on top of the script:
 12. Hovering either agent button explains it: "Sends “LGTM - …” to this
     thread's agent, as if you had typed it. Runs no git here."
 
+## Composer banner scenarios (`live-check-m7.mjs`)
+
+On the same scratch thread, with the tree clean to start.
+
+1. Nothing above the message box while the tree is clean.
+2. Editing a tracked file and adding a new one brings the banner up on its
+   own, without a click anywhere: the file watch the first overview registered
+   is what pushes it. It reads "main" and "2 to commit".
+3. Hovering the count breaks it down: "1 unstaged, 1 untracked". Untracked
+   files count here, unlike the check a checkout runs.
+4. Both buttons read "Agent Commit" and "Agent Commit & Push", are enabled,
+   and their accessible name ends "Runs no git here."
+5. Restoring the file and deleting the new one takes the banner away again.
+
+Manual, on top of the script:
+
+6. Clicking either button from the banner. The script will not: this banner
+   only exists over a dirty tree, so a click here wakes the thread's agent
+   with something real to commit. The event log (`bb thread log`) shows the
+   line, and a toast quotes it back — the same `sendToAgent` the panel's
+   buttons use, which `server.test.ts` covers against `AGENT_ACTIONS`.
+
 ## Last run
 
 2026-09-09, bb 0.42.1, git 2.55, one local machine: milestone 1 scenarios
@@ -347,3 +372,9 @@ the pointer, an item ended up under it, and the release of the right-click
 that opened the menu ran that item (Radix clicks an item on a pointerup it
 saw no pointerdown for). `components/ui/context-menu.tsx` now ignores that
 release; the whole suite passes again.
+
+The composer banner's five scenarios pass headlessly on 2026-09-13, bb 0.43.0,
+git 2.55, the same machine. Scenario 2 is the interesting one: nothing clicks,
+the file watch does it. Scenario 3 first failed on the script rather than the
+plugin — `[title]` inside the banner matched the branch, which carries its own
+tooltip, so the count element names itself now.

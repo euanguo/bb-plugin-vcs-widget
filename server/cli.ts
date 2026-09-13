@@ -11,6 +11,7 @@ import type { PluginCliCommandInfo, PluginCliResult } from "@get-bb/plugin-sdk";
 import type { LocalBranch, LogCommit, LogFilter, LogPage, Overview, RemoteBranch } from "../contracts";
 import { isValidGitBranchName } from "../shared/branch-name";
 import { LOG_PAGE_SIZE, MAX_LOG_GREP_LENGTH } from "../shared/constants";
+import { workingTreeSummary } from "../shared/model";
 
 export const CLI_NAME = "vcs-widget";
 
@@ -199,16 +200,6 @@ function upstreamLine(upstream: Overview["upstream"]): string {
   return `${upstream.name} (${state})`;
 }
 
-function workingTreeLine(tree: Overview["workingTree"]): string {
-  const parts = [
-    tree.staged > 0 ? `${tree.staged} staged` : null,
-    tree.unstaged > 0 ? `${tree.unstaged} unstaged` : null,
-    tree.untracked > 0 ? `${tree.untracked} untracked` : null,
-    tree.conflicted > 0 ? `${tree.conflicted} conflicted` : null,
-  ].filter((part): part is string => part !== null);
-  return parts.length === 0 ? "clean" : parts.join(", ");
-}
-
 function row(label: string, value: string): string {
   return `${pad(`${label}:`, 12)}${value}`;
 }
@@ -219,7 +210,7 @@ export function formatStatus(overview: Overview): string {
     row("Repository", `${overview.repoName ?? "?"} (${overview.repoRoot ?? "?"})`),
     row("HEAD", headLine(overview.head)),
     row("Upstream", upstreamLine(overview.upstream)),
-    row("Working", workingTreeLine(overview.workingTree)),
+    row("Working", workingTreeSummary(overview.workingTree)),
   ];
   if (overview.operation !== "none") lines.push(row("Operation", `${overview.operation} in progress`));
   if (overview.indexLocked) lines.push(row("Index", "locked (.git/index.lock exists)"));

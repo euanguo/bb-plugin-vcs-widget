@@ -41,8 +41,10 @@ group, ssh and credential helpers included.
 argument that turns either into a write.
 
 Agent Commit and Agent Commit & Push send one of two fixed lines to the thread
-as an ordinary user message, and the caller names a variant, never the text. It
-widens nothing: whatever can call it can already send the thread any message it
+as an ordinary user message, and the caller names a variant, never the text.
+Both places they appear — the commit panel and the strip above the message box
+— take that same route, so those two lines remain the whole of what the plugin
+can say to an agent. It widens nothing: whatever can call it can already send the thread any message it
 likes through bb's own API.
 
 ## What it does not close

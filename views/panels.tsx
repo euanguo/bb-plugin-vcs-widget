@@ -84,8 +84,8 @@ function FileList({
               <span className="text-muted-foreground">binary</span>
             ) : (
               <span className="shrink-0 tabular-nums">
-                <span className="text-green-600 dark:text-green-400">+{file.additions}</span>{" "}
-                <span className="text-red-600 dark:text-red-400">−{file.deletions}</span>
+                <span className="text-diff-added">+{file.additions}</span>{" "}
+                <span className="text-diff-removed">−{file.deletions}</span>
               </span>
             )}
           </button>

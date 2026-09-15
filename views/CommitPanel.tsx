@@ -43,16 +43,19 @@ interface PanelProps {
   params: unknown;
 }
 
-/** IntelliJ's colours for the status letter. */
+/**
+ * The status letter's colour, in the host theme's tokens so it follows a
+ * custom theme the way bb's own diff stats do.
+ */
 const LETTER_CLASS: Record<string, string> = {
-  M: "text-blue-600 dark:text-blue-400",
-  T: "text-blue-600 dark:text-blue-400",
-  R: "text-blue-600 dark:text-blue-400",
-  A: "text-green-600 dark:text-green-400",
-  C: "text-green-600 dark:text-green-400",
+  M: "text-attention",
+  T: "text-attention",
+  R: "text-attention",
+  A: "text-diff-added",
+  C: "text-diff-added",
   D: "text-muted-foreground line-through",
-  "?": "text-amber-700 dark:text-amber-400",
-  U: "text-red-600 dark:text-red-400",
+  "?": "text-warning-text",
+  U: "text-diff-removed",
 };
 
 /** The paths one row stands for: a staged rename is two index entries. */

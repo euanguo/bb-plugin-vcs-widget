@@ -1085,7 +1085,9 @@ describe("LogPanel", () => {
     const slot = renderLogPanel({ params: { filter: { kind: "ref", ref: { kind: "local", name: "feature" } } } });
     await slot.findByText("a change");
     expect(slot.inspection.rpcCalls.find((call) => call.method === "log")?.input).toMatchObject({ filter: { kind: "ref", ref: { kind: "local", name: "feature" } } });
-    expect((slot.getByTestId("vcs-log-filter") as HTMLSelectElement).value).toBe("ref:feature");
+    // The branch filter is a Radix Select now: it renders the option's label,
+    // not a native <select> whose `.value` carries the raw option value.
+    expect(slot.getByTestId("vcs-log-filter").textContent).toContain("feature");
     const ignored = renderLogPanel({ params: { filter: { kind: "ref", ref: { kind: "local", name: "-bad" } } } });
     await ignored.findByText("a change");
     expect(ignored.inspection.rpcCalls.find((call) => call.method === "log")?.input).toMatchObject({ filter: { kind: "all" } });
@@ -1095,7 +1097,9 @@ describe("LogPanel", () => {
     const user = userEvent.setup();
     const slot = renderLogPanel();
     await slot.findByText("a change");
-    await user.selectOptions(slot.getByTestId("vcs-log-filter"), "head");
+    // Drive the Radix Select the way a pointer does: open it, then pick a row.
+    await user.click(slot.getByTestId("vcs-log-filter"));
+    await user.click(await slot.findByRole("option", { name: "Current branch" }));
     await waitFor(() => expect(slot.inspection.rpcCalls.filter((call) => call.method === "log")).toHaveLength(2));
     expect(slot.inspection.rpcCalls.at(-1)?.input).toMatchObject({ filter: { kind: "head" } });
     await user.type(slot.getByTestId("vcs-log-search"), "fix");

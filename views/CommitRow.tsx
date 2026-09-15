@@ -25,9 +25,9 @@ export interface CommitMenuExtra {
 
 const BADGE_CLASS: Record<RefBadge["kind"], string> = {
   head: "border-foreground/40 text-foreground",
-  local: "border-green-600/50 text-green-700 dark:border-green-400/50 dark:text-green-400",
-  remote: "border-blue-600/50 text-blue-700 dark:border-blue-400/50 dark:text-blue-400",
-  tag: "border-amber-600/50 text-amber-700 dark:border-amber-400/50 dark:text-amber-400",
+  local: "border-success/50 text-success",
+  remote: "border-attention/50 text-attention",
+  tag: "border-warning/50 text-warning-text",
   other: "border-border text-muted-foreground",
 };
 

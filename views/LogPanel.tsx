@@ -25,6 +25,15 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
 interface PanelProps {
@@ -94,8 +103,8 @@ function FileList({
               <span className="text-muted-foreground">binary</span>
             ) : (
               <span className="shrink-0 tabular-nums">
-                <span className="text-green-600 dark:text-green-400">+{file.additions}</span>{" "}
-                <span className="text-red-600 dark:text-red-400">−{file.deletions}</span>
+                <span className="text-diff-added">+{file.additions}</span>{" "}
+                <span className="text-diff-removed">−{file.deletions}</span>
               </span>
             )}
           </button>
@@ -272,34 +281,40 @@ export function LogPanel({ threadId, params }: PanelProps) {
         <label className="sr-only" htmlFor={filterId}>
           Branch filter
         </label>
-        <select
-          id={filterId}
-          className="h-6 min-w-20 max-w-36 rounded border border-border bg-transparent px-1 text-xs"
-          value={filterValue(filter)}
-          onChange={(event) => onFilterChange(event.target.value)}
-          data-testid="vcs-log-filter"
-        >
-          <option value="all">All branches</option>
-          <option value="head">Current branch</option>
-          {options.local.length > 0 ? (
-            <optgroup label="Local">
-              {options.local.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </optgroup>
-          ) : null}
-          {options.remote.length > 0 ? (
-            <optgroup label="Remote">
-              {options.remote.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </optgroup>
-          ) : null}
-        </select>
+        <Select value={filterValue(filter)} onValueChange={onFilterChange}>
+          <SelectTrigger
+            id={filterId}
+            aria-label="Branch filter"
+            className="h-6 min-w-20 max-w-36 px-1 text-xs"
+            data-testid="vcs-log-filter"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All branches</SelectItem>
+            <SelectItem value="head">Current branch</SelectItem>
+            {options.local.length > 0 ? (
+              <SelectGroup>
+                <SelectLabel>Local</SelectLabel>
+                {options.local.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            ) : null}
+            {options.remote.length > 0 ? (
+              <SelectGroup>
+                <SelectLabel>Remote</SelectLabel>
+                {options.remote.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            ) : null}
+          </SelectContent>
+        </Select>
         <Input
           aria-label="Filter commit messages"
           placeholder="Filter messages"

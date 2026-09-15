@@ -166,11 +166,40 @@ export async function diffFiles(
       if (entry !== undefined && section !== undefined) patchByPath.set(entry.path, section);
     }
   }
-  return input.paths.map((path) => {
-    const raw = patchByPath.get(path) ?? "";
-    const capped = capPatch(raw);
-    return { path, patch: capped.patch, truncated: capped.truncated, binary: capped.binary };
-  });
+  const files = await Promise.all(
+    input.paths.map(async (path) => {
+      const raw = patchByPath.get(path);
+      if (raw !== undefined) {
+        const capped = capPatch(raw);
+        return { path, patch: capped.patch, truncated: capped.truncated, binary: capped.binary };
+      }
+      // `git diff` intentionally omits an untracked file. The single-file
+      // reader has always turned it into `--no-index /dev/null`; keep that
+      // behavior in the stream too, otherwise an untracked PNG is an empty
+      // text diff and can never reach the image preview below it.
+      const untracked =
+        input.side === "worktree" &&
+        (await isUntrackedFile(context, path));
+      if (!untracked) return { path, patch: "", truncated: false, binary: false };
+      const result = await runGit(
+        ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", path],
+        read,
+      );
+      // Exit 1 is git's normal "these files differ" result for --no-index.
+      if (result.code !== 0 && result.code !== 1) return { path, patch: "", truncated: false, binary: false };
+      const capped = capPatch(result.stdout);
+      return { path, patch: capped.patch, truncated: capped.truncated, binary: capped.binary };
+    }),
+  );
+  return files;
+}
+
+/** True only for an existing path git does not track. */
+async function isUntrackedFile(context: ActionContext, path: string): Promise<boolean> {
+  const read = readOptions(context);
+  const tracked = await runGit(["--literal-pathspecs", "ls-files", "--", path], read);
+  if (tracked.code !== 0 || tracked.stdout.trim() !== "") return false;
+  return stat(join(context.repo.repoRoot, path)).then((info) => info.isFile(), () => false);
 }
 
 /**

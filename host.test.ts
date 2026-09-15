@@ -688,6 +688,24 @@ describe("compare and diff", () => {
     expect(result.files).toEqual([{ path: "does-not-exist.txt", patch: "", truncated: false, binary: false }]);
   });
 
+  it("turns an untracked binary file into a binary batch entry", async () => {
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
+    await writeFile(join(repo, "untracked.png"), bytes);
+    try {
+      const result = await harness.experimental_call("diffFiles", {
+        repoPath: repo,
+        paths: ["untracked.png"],
+        side: "worktree",
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]).toMatchObject({ path: "untracked.png", binary: true, truncated: false });
+    } finally {
+      await rm(join(repo, "untracked.png"), { force: true });
+    }
+  });
+
   it("refuses an empty or oversized path list at the contract boundary", async () => {
     await expect(harness.experimental_call("diffFiles", { repoPath: repo, paths: [], side: "index" })).rejects.toThrow();
     const tooMany = Array.from({ length: 51 }, (_, index) => `f${index}.txt`);

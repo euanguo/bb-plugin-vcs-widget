@@ -649,6 +649,50 @@ describe("compare and diff", () => {
       await git(repo, "checkout", "--", "a.txt");
     }
   });
+
+  it("reads many files' patches in one call, one entry per requested path", async () => {
+    await writeFile(join(repo, "batch-a.txt"), "one\n");
+    await writeFile(join(repo, "batch-b.txt"), "two\n");
+    await git(repo, "add", "batch-a.txt", "batch-b.txt");
+    try {
+      const result = await harness.experimental_call("diffFiles", {
+        repoPath: repo,
+        paths: ["batch-a.txt", "batch-b.txt"],
+        side: "index",
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.files.map((file) => file.path)).toEqual(["batch-a.txt", "batch-b.txt"]);
+      const [first, second] = result.files;
+      // Each entry carries only its own file's patch, not the whole batch.
+      expect(first?.patch).toContain("+one");
+      expect(first?.patch).not.toContain("+two");
+      expect(second?.patch).toContain("+two");
+      expect(second?.patch).not.toContain("+one");
+      expect(result.files.every((file) => file.truncated === false && file.binary === false)).toBe(true);
+    } finally {
+      await git(repo, "reset", "-q", "--", "batch-a.txt", "batch-b.txt");
+      await rm(join(repo, "batch-a.txt"), { force: true });
+      await rm(join(repo, "batch-b.txt"), { force: true });
+    }
+  });
+
+  it("answers a path git cannot diff with an empty entry rather than failing the batch", async () => {
+    const result = await harness.experimental_call("diffFiles", {
+      repoPath: repo,
+      paths: ["does-not-exist.txt"],
+      side: "worktree",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.files).toEqual([{ path: "does-not-exist.txt", patch: "", truncated: false, binary: false }]);
+  });
+
+  it("refuses an empty or oversized path list at the contract boundary", async () => {
+    await expect(harness.experimental_call("diffFiles", { repoPath: repo, paths: [], side: "index" })).rejects.toThrow();
+    const tooMany = Array.from({ length: 51 }, (_, index) => `f${index}.txt`);
+    await expect(harness.experimental_call("diffFiles", { repoPath: repo, paths: tooMany, side: "index" })).rejects.toThrow();
+  });
 });
 
 describe("commit panel", () => {

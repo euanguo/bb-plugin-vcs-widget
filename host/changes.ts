@@ -5,8 +5,9 @@
 // path from `git status` can never turn into a glob or pathspec magic.
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import type { ActionResult, ChangesResult, CommitInput, DiscardInput, FileDiff, GitError, Head } from "../contracts";
+import type { ActionResult, ChangesResult, CommitInput, DiffBatchResult, DiscardInput, FileDiff, GitError, Head } from "../contracts";
 import { CHANGES_LIMIT, type DiffSide } from "../shared/constants";
+import { splitPatchIntoSections } from "../shared/diff-tiering";
 import { classifyGitFailure, pluginGitError, type GitPhase } from "../shared/git-errors";
 import { discardPlans, type GitPlan } from "../shared/model";
 import { parseCommitSummary, parseStatusEntries, parseStatusV2 } from "../shared/parse";
@@ -122,6 +123,80 @@ export async function diffFile(
     }
   }
   return { ok: true, path: input.path, side: input.side, patch, truncated, binary, contents };
+}
+
+/**
+ * One combined `git diff` for many files on one side, split back into one
+ * patch per path. `--name-status -z` is read alongside it and the two lists
+ * are paired by position, which is what makes a rename's two paths resolve to
+ * a single entry. When the counts disagree (a path vanished between the two
+ * reads, or a section carried no `diff --git` line) the caller gets one
+ * patch per requested path with whatever was found, so a stale path costs a
+ * blank entry rather than the whole batch.
+ *
+ * The combined read is what keeps a long stream to one host call instead of
+ * one per file, and `maxBytes` is the same per-file budget `diffFile` uses.
+ */
+export async function diffFiles(
+  context: ActionContext,
+  input: { paths: readonly string[]; side: DiffSide },
+): Promise<{ path: string; patch: string; truncated: boolean; binary: boolean }[]> {
+  if (input.paths.length === 0) return [];
+  const read = readOptions(context);
+  const sideArgs = input.side === "index" ? ["--cached"] : [];
+  const blank = () =>
+    input.paths.map((path) => ({ path, patch: "", truncated: false, binary: false }));
+  const [patchRaw, nameStatusRaw] = await Promise.all([
+    runGit(
+      ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "-M", ...sideArgs, "--", ...input.paths],
+      read,
+    ),
+    runGit(["--literal-pathspecs", "diff", "--name-status", "-z", "-M", ...sideArgs, "--", ...input.paths], read),
+  ]);
+  // A batch that fails whole still answers per path, so one unreadable entry
+  // cannot blank the stream.
+  if (patchRaw.code !== 0 || nameStatusRaw.code !== 0) return blank();
+  const entries = parseNameStatusPaths(nameStatusRaw.stdout);
+  const sections = splitPatchIntoSections(patchRaw.stdout);
+  const patchByPath = new Map<string, string>();
+  if (entries.length === sections.length) {
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
+      const section = sections[index];
+      if (entry !== undefined && section !== undefined) patchByPath.set(entry.path, section);
+    }
+  }
+  return input.paths.map((path) => {
+    const raw = patchByPath.get(path) ?? "";
+    const capped = capPatch(raw);
+    return { path, patch: capped.patch, truncated: capped.truncated, binary: capped.binary };
+  });
+}
+
+/**
+ * `git diff --name-status -z` as one entry per change. A rename or copy
+ * prints `R<score>` and then both paths as separate NUL-terminated records,
+ * so the pair is read together and the entry carries the new path.
+ */
+function parseNameStatusPaths(raw: string): { path: string; oldPath: string | null }[] {
+  const tokens = raw.split("\0");
+  const entries: { path: string; oldPath: string | null }[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const status = tokens[index] ?? "";
+    if (status.length === 0) continue;
+    const letter = status[0] ?? "";
+    if (letter === "R" || letter === "C") {
+      const oldPath = tokens[index + 1] ?? "";
+      const path = tokens[index + 2] ?? "";
+      index += 2;
+      if (path.length > 0) entries.push({ path, oldPath: oldPath.length > 0 ? oldPath : null });
+      continue;
+    }
+    const path = tokens[index + 1] ?? "";
+    index += 1;
+    if (path.length > 0) entries.push({ path, oldPath: null });
+  }
+  return entries;
 }
 
 // ---------------------------------------------------------------------------

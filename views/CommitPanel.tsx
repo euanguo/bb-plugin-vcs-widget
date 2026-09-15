@@ -7,6 +7,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type Keybo
 import { experimental_Diff as Diff, useRpc } from "@get-bb/plugin-sdk/app";
 import type { ChangeEntry, FileDiff } from "../contracts";
 import { useChanges } from "../hooks/use-changes";
+import { useDiffPatches } from "../hooks/use-diff-patches";
 import { useJobs } from "../hooks/use-jobs";
 import { useOverview } from "../hooks/use-overview";
 import { useSidebarThread } from "../hooks/use-sidebar-thread";
@@ -25,6 +26,7 @@ import {
   type FileMenuItemId,
 } from "../shared/model";
 import { ConfirmStep } from "./ConfirmStep";
+import { ContinuousDiffStream } from "./ContinuousDiffStream";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -235,8 +237,9 @@ export function CommitPanel({ threadId }: PanelProps) {
   const actions = useVcsActions({ threadId, overview, applyOverview, onCheckedOut: () => undefined, waitForJob: jobs.waitFor, quiet: true });
 
   const [selected, setSelected] = useState<string | null>(null);
-  const [sideChoice, setSideChoice] = useState<DiffSide | null>(null);
-  const [diff, setDiff] = useState<FileDiff | "loading" | null>(null);
+  // A file-list click scrolls the stream to that file rather than swapping
+  // what the pane shows; the request is cleared once it has been honoured.
+  const [scrollToPath, setScrollToPath] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [amend, setAmend] = useState(false);
   // What the two things that are not git actions report: the copied path and
@@ -249,6 +252,10 @@ export function CommitPanel({ threadId }: PanelProps) {
   // The message Amend filled in, so turning it off can clear it again.
   const prefilled = useRef<string | null>(null);
 
+  // Every successful `changes` read is a new object, so its identity is what
+  // tells the stream that a cached patch may now describe an older tree.
+  const changesUpdatedAt = changes;
+
   const files = useMemo(() => (changes?.ok ? changes.files : []), [changes]);
   const groups = useMemo(
     () => ({
@@ -259,30 +266,15 @@ export function CommitPanel({ threadId }: PanelProps) {
     [files],
   );
   const stagedCount = files.filter(isStaged).length;
-  const entry = files.find((candidate) => candidate.path === selected) ?? null;
-  const sides = entry === null ? [] : diffSidesFor(entry);
-  const side: DiffSide | null = sideChoice !== null && sides.includes(sideChoice) ? sideChoice : (sides[0] ?? null);
-
-  useEffect(() => {
-    if (entry === null || side === null) {
-      setDiff(null);
-      return;
-    }
-    let cancelled = false;
-    setDiff("loading");
-    rpc.call("diffFile", { threadId, path: entry.path, oldPath: entry.oldPath, side }).then(
-      (next) => {
-        if (!cancelled) setDiff(next);
-      },
-      (cause) => {
-        if (!cancelled) setDiff({ ok: false, error: { code: "git_failed", message: errorMessage(cause) } });
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- refetch when the list changed, whatever entry object it produced
-  }, [rpc, threadId, entry?.path, entry?.oldPath, side, changes]);
+  // The stream reads one side at a time, which is what lets a batch read stay
+  // one host call per page. Unstaged first: reviewing what is not yet in the
+  // index is the common case.
+  const [streamSide, setStreamSide] = useState<DiffSide>("worktree");
+  const streamFiles = useMemo(
+    () => files.filter((candidate) => diffSidesFor(candidate).includes(streamSide)),
+    [files, streamSide],
+  );
+  const patches = useDiffPatches(threadId, streamSide, true);
 
   const blocked = commitBlockedReason(overview, changes);
   const busy = actions.busy;
@@ -434,44 +426,70 @@ export function CommitPanel({ threadId }: PanelProps) {
         </Button>
       </header>
 
-      <div className="min-h-0 shrink-0 basis-2/5 overflow-auto border-b border-border" aria-label="Changed files">
-        {error !== null ? (
-          <p className="p-4 text-sm text-destructive">{error}</p>
-        ) : changes === null ? (
-          <Empty>Reading the working tree…</Empty>
-        ) : !changes.ok ? (
-          <p className="p-4 text-sm text-destructive">{changes.error.message}</p>
-        ) : files.length === 0 ? (
-          <Empty>Nothing to commit: the working tree is clean.</Empty>
-        ) : (
-          <>
-            <Group title="Conflicts" entries={groups.conflicts} selected={selected} disabled={busy} onToggleAll={toggleAll} onToggle={toggle} onSelect={(next) => setSelected(next.path)} onDiscard={discardOne} onMenu={onFileMenu} onDiscardAll={null} />
-            <Group title="Changes" entries={groups.changes} selected={selected} disabled={busy} onToggleAll={toggleAll} onToggle={toggle} onSelect={(next) => setSelected(next.path)} onDiscard={discardOne} onMenu={onFileMenu} onDiscardAll={discardAll} />
-            <Group title="Unversioned files" entries={groups.untracked} selected={selected} disabled={busy} onToggleAll={toggleAll} onToggle={toggle} onSelect={(next) => setSelected(next.path)} onDiscard={discardOne} onMenu={onFileMenu} onDiscardAll={discardAll} />
-            {changes.truncated ? <p className="px-2 py-1 text-xs text-muted-foreground">Only the first {files.length} files are listed.</p> : null}
-          </>
-        )}
-      </div>
-
-      <div className="flex min-h-0 flex-1 flex-col">
-        {entry !== null ? (
-          <div className="flex items-center gap-2 border-b border-border px-3 py-1 text-xs">
-            <span className="min-w-0 flex-1 truncate font-medium">{entry.path}</span>
-            {sides.length > 1 ? (
-              <div role="group" aria-label="Diff side" className="flex gap-1">
-                <Button type="button" size="sm" className="h-6 px-2 text-xs" variant={side === "index" ? "secondary" : "ghost"} onClick={() => setSideChoice("index")} aria-pressed={side === "index"}>
-                  Staged
-                </Button>
-                <Button type="button" size="sm" className="h-6 px-2 text-xs" variant={side === "worktree" ? "secondary" : "ghost"} onClick={() => setSideChoice("worktree")} aria-pressed={side === "worktree"}>
-                  Unstaged
-                </Button>
-              </div>
-            ) : (
-              <span className="text-muted-foreground">{side === "index" ? "Staged" : entry.kind === "untracked" ? "Untracked" : "Unstaged"}</span>
-            )}
+      {/* Left: every changed file's diff, stacked. Right: the file list. */}
+      <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col border-r border-border">
+          <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
+            <span className="shrink-0 text-xs text-muted-foreground">Diff</span>
+            <div role="group" aria-label="Diff side" className="flex gap-1">
+              <Button
+                type="button"
+                size="sm"
+                className="h-6 px-2 text-xs"
+                variant={streamSide === "worktree" ? "secondary" : "ghost"}
+                onClick={() => setStreamSide("worktree")}
+                aria-pressed={streamSide === "worktree"}
+                data-testid="vcs-stream-side-worktree"
+              >
+                Unstaged
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                className="h-6 px-2 text-xs"
+                variant={streamSide === "index" ? "secondary" : "ghost"}
+                onClick={() => setStreamSide("index")}
+                aria-pressed={streamSide === "index"}
+                data-testid="vcs-stream-side-index"
+              >
+                Staged
+              </Button>
+            </div>
           </div>
-        ) : null}
-        <DiffView diff={diff} />
+          <ContinuousDiffStream
+            files={streamFiles}
+            side={streamSide}
+            patches={patches}
+            filesUpdatedAt={changesUpdatedAt}
+            isPanelOpen
+            scrollToPath={scrollToPath}
+            onScrolledToPath={() => setScrollToPath(null)}
+            onOpenFile={undefined}
+          />
+        </div>
+
+        <div
+          className="flex min-h-0 w-72 shrink-0 flex-col overflow-y-auto"
+          aria-label="Changed files"
+          data-testid="vcs-file-list"
+        >
+          {error !== null ? (
+            <p className="p-4 text-sm text-destructive">{error}</p>
+          ) : changes === null ? (
+            <Empty>Reading the working tree…</Empty>
+          ) : !changes.ok ? (
+            <p className="p-4 text-sm text-destructive">{changes.error.message}</p>
+          ) : files.length === 0 ? (
+            <Empty>Nothing to commit: the working tree is clean.</Empty>
+          ) : (
+            <>
+              <Group title="Conflicts" entries={groups.conflicts} selected={selected} disabled={busy} onToggleAll={toggleAll} onToggle={toggle} onSelect={(next) => { setSelected(next.path); setScrollToPath(next.path); }} onDiscard={discardOne} onMenu={onFileMenu} onDiscardAll={null} />
+              <Group title="Changes" entries={groups.changes} selected={selected} disabled={busy} onToggleAll={toggleAll} onToggle={toggle} onSelect={(next) => { setSelected(next.path); setScrollToPath(next.path); }} onDiscard={discardOne} onMenu={onFileMenu} onDiscardAll={discardAll} />
+              <Group title="Unversioned files" entries={groups.untracked} selected={selected} disabled={busy} onToggleAll={toggleAll} onToggle={toggle} onSelect={(next) => { setSelected(next.path); setScrollToPath(next.path); }} onDiscard={discardOne} onMenu={onFileMenu} onDiscardAll={discardAll} />
+              {changes.truncated ? <p className="px-2 py-1 text-xs text-muted-foreground">Only the first {files.length} files are listed.</p> : null}
+            </>
+          )}
+        </div>
       </div>
 
       <form

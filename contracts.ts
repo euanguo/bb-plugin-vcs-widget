@@ -11,6 +11,7 @@ import { defineRpcContract, type ExperimentalHostSignals } from "@get-bb/plugin-
 import { z } from "zod";
 import {
   AGENT_ACTION_VARIANTS,
+  DIFF_PATCH_MAX_PATHS_PER_REQUEST,
   DIFF_SIDES,
   JOB_KINDS,
   LOG_MAX_SKIP,
@@ -566,6 +567,30 @@ const commitFields = {
 /** `oldPath` (a rename's original) joins the pathspec so the patch shows the rename. */
 const diffFileFields = { path: repoFilePathSchema, oldPath: repoFilePathSchema.nullable(), side: diffSideSchema };
 
+/** One file's patch inside a batch read; a path git could not diff comes back empty. */
+export const diffBatchEntrySchema = z
+  .object({
+    path: z.string(),
+    patch: z.string(),
+    truncated: z.boolean(),
+    binary: z.boolean(),
+  })
+  .strict();
+
+/**
+ * A batch read for the continuous stream: one side, many paths, one call.
+ * `paths` is capped at bb's own per-request limit so a page can never grow
+ * past what one host call handles.
+ */
+const diffBatchFields = {
+  paths: z.array(repoFilePathSchema).min(1).max(DIFF_PATCH_MAX_PATHS_PER_REQUEST),
+  side: diffSideSchema,
+};
+export const diffBatchResultSchema = z.union([
+  z.object({ ok: z.literal(true), files: z.array(diffBatchEntrySchema) }).strict(),
+  failure,
+]);
+
 // ---------------------------------------------------------------------------
 // Browser -> server. Every input carries the thread; the server resolves the
 // environment and the settings-backed defaults (null means "use the setting").
@@ -731,6 +756,10 @@ export const rpcContract = defineRpcContract({
   diffFile: {
     input: threadInput.extend(diffFileFields).strict(),
     output: fileDiffSchema,
+  },
+  diffFiles: {
+    input: threadInput.extend(diffBatchFields).strict(),
+    output: diffBatchResultSchema,
   },
   stage: {
     input: threadInput.extend(stageFields).strict(),
@@ -901,6 +930,10 @@ export const hostContract = defineRpcContract({
     input: repoInput.extend(diffFileFields).strict(),
     output: fileDiffSchema,
   },
+  diffFiles: {
+    input: repoInput.extend(diffBatchFields).strict(),
+    output: diffBatchResultSchema,
+  },
   stage: {
     input: repoInput.extend(stageFields).strict(),
     output: actionResultSchema,
@@ -957,6 +990,7 @@ export type TagList = z.infer<typeof tagListSchema>;
 export type ChangeEntry = z.infer<typeof changeEntrySchema>;
 export type ChangesResult = z.infer<typeof changesResultSchema>;
 export type FileDiff = z.infer<typeof fileDiffSchema>;
+export type DiffBatchResult = z.infer<typeof diffBatchResultSchema>;
 export type DiscardInput = { restore: string[]; remove: string[]; clean: string[] };
 export type CommitInput = { message: string; amend: boolean; signoff: boolean; noVerify: boolean };
 export type HostSignals = typeof hostSignals;

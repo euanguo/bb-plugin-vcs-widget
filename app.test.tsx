@@ -204,6 +204,10 @@ function render(options: {
         clearFavourites: () => ({ repos: [] }),
         changes: () => CHANGES,
         diffFile: (input) => ({ ok: true, path: input.path, side: input.side, patch: "@@ -1 +1 @@\n-a\n+b\n", truncated: false, binary: false, contents: { old: { path: input.path, content: "a\n" }, new: { path: input.path, content: "b\n" } } }),
+        diffFiles: (input) => ({
+          ok: true,
+          files: input.paths.map((path) => ({ path, patch: "@@ -1 +1 @@\n-a\n+b\n", truncated: false, binary: false })),
+        }),
         stage: (input) => ({ ok: true, message: `Staged ${input.paths.length} file(s).`, overview: view }),
         unstage: (input) => ({ ok: true, message: `Unstaged ${input.paths.length} file(s).`, overview: view }),
         discard: () => ({ ok: true, message: "Discarded.", overview: view }),
@@ -755,6 +759,10 @@ describe("CommitPanel", () => {
           overview: () => view,
           changes: () => options.changes ?? CHANGES,
           diffFile: (input: { path: string; side: "index" | "worktree" }) => ({ ok: true, path: input.path, side: input.side, patch: "@@ -1 +1 @@\n-a\n+b\n", truncated: false, binary: false, contents: null }),
+          diffFiles: (input: { paths: string[]; side: "index" | "worktree" }) => ({
+            ok: true,
+            files: input.paths.map((path) => ({ path, patch: "@@ -1 +1 @@\n-a\n+b\n", truncated: false, binary: false })),
+          }),
           stage: (input: { paths: string[] }) => ({ ok: true, message: `Staged ${input.paths.length} file(s).`, overview: view }),
           unstage: (input: { paths: string[] }) => ({ ok: true, message: `Unstaged ${input.paths.length} file(s).`, overview: view }),
           discard: () => ({ ok: true, message: "Discarded.", overview: view }),
@@ -770,6 +778,9 @@ describe("CommitPanel", () => {
 
   const calls = (slot: { inspection: { rpcCalls: { method: string; input: unknown }[] } }, method: string) =>
     slot.inspection.rpcCalls.filter((call) => call.method === method).map((call) => call.input);
+  /** The batch reads, typed: `calls` returns `unknown` inputs by design. */
+  const batchCalls = (slot: { inspection: { rpcCalls: { method: string; input: unknown }[] } }) =>
+    calls(slot, "diffFiles") as { threadId: string; paths: string[]; side: "index" | "worktree" }[];
 
   it("lists the working tree in groups with the checkbox as the staged state", async () => {
     const slot = renderCommitPanel();
@@ -798,11 +809,14 @@ describe("CommitPanel", () => {
   it("previews the staged side of a selected file and lets the other side be picked", async () => {
     const user = userEvent.setup();
     const slot = renderCommitPanel();
-    await user.click(await slot.findByText("both.txt"));
-    await slot.findByTestId("vcs-patch");
-    expect(calls(slot, "diffFile")).toEqual([{ threadId: "t1", path: "both.txt", oldPath: null, side: "index" }]);
-    await user.click(slot.getByText("Unstaged", { selector: "button" }));
-    await waitFor(() => expect(calls(slot, "diffFile").at(-1)).toEqual({ threadId: "t1", path: "both.txt", oldPath: null, side: "worktree" }));
+    // The stream reads one side for every file at once, and the side switch
+    // sits above it: picking "Staged" re-reads the whole visible set.
+    await waitFor(() => expect(batchCalls(slot).length).toBeGreaterThan(0));
+    expect(batchCalls(slot).at(-1)).toMatchObject({ threadId: "t1", side: "worktree" });
+    expect(batchCalls(slot).at(-1)?.paths).toContain("both.txt");
+    await user.click(slot.getByTestId("vcs-stream-side-index"));
+    await waitFor(() => expect(batchCalls(slot).at(-1)).toMatchObject({ threadId: "t1", side: "index" }));
+    expect(batchCalls(slot).at(-1)?.paths).toContain("both.txt");
   });
 
   it("commits the index with the message as a job and clears the message when it finishes", async () => {
@@ -823,10 +837,13 @@ describe("CommitPanel", () => {
 
   it("refuses to commit while blocked, and without anything staged", async () => {
     const slot = renderCommitPanel({ changes: { ...CHANGES, indexLocked: true } });
-    await slot.findByText("staged.txt");
+    await waitFor(() => expect(slot.getAllByTestId("vcs-file-list").length).toBeGreaterThan(0));
     expect(slot.getByText("Another git process holds the index lock.")).toBeTruthy();
+    // A second panel is mounted beside the first, so this one's nodes are
+    // reached through its own container rather than the shared screen.
     const empty = renderCommitPanel({ changes: { ...CHANGES, files: [CHANGES.files[1]!] } });
-    await empty.findByText("edited.txt");
+    const emptyList = empty.getAllByTestId("vcs-file-list").at(-1)!;
+    await waitFor(() => expect(within(emptyList).getByText("edited.txt")).toBeTruthy());
     expect(empty.getByText("Nothing is staged: tick the files to include.")).toBeTruthy();
   });
 
@@ -846,7 +863,7 @@ describe("CommitPanel", () => {
   it("discard asks with one command per category and runs nothing on cancel", async () => {
     const user = userEvent.setup();
     const slot = renderCommitPanel();
-    await slot.findByText("new.txt");
+    await slot.findByTestId("vcs-file-list");
     await user.click(slot.getByLabelText("Discard changes in new.txt"));
     expect((await screen.findByTestId("vcs-command-preview")).textContent).toBe("git --literal-pathspecs clean -f -- new.txt");
     await user.click(screen.getByText("Cancel"));
@@ -858,8 +875,11 @@ describe("CommitPanel", () => {
   });
 
   /** Right-clicks a file row and returns its menu. */
-  async function openFileMenu(slot: { getByText: (text: string) => HTMLElement }, path: string) {
-    const row = slot.getByText(path).closest("[data-path]");
+  async function openFileMenu(slot: { getByTestId: (id: string) => HTMLElement }, path: string) {
+    // Scope to the file list: the diff stream also renders each path in its
+    // own row header, so a document-wide text query matches twice.
+    const list = slot.getByTestId("vcs-file-list");
+    const row = within(list).getByText(path).closest("[data-path]");
     if (!(row instanceof HTMLElement)) throw new Error(`no row for ${path}`);
     fireEvent.contextMenu(row, { clientX: 10, clientY: 10 });
     return screen.findByTestId("vcs-file-menu");

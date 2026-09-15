@@ -98,3 +98,9 @@ export const AGENT_ACTION_VARIANTS = ["commit", "commit-push"] as const satisfie
 
 /** `git switch` and `--end-of-options` arrived in 2.24. */
 export const MIN_GIT_VERSION = { major: 2, minor: 24 } as const;
+
+/**
+ * Paths per batch diff read. Matches bb's own per-request cap so one page of
+ * the continuous stream can never ask for more than a host call handles.
+ */
+export const DIFF_PATCH_MAX_PATHS_PER_REQUEST = 50;

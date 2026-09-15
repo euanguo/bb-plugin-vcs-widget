@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { branchNameProblem } from "../shared/branch-name";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Icon } from "@/components/ui/icon";
+import { Icon } from "@bb/shared-ui/icon";
 import { Input } from "@/components/ui/input";
 
 interface NewBranchStepProps {

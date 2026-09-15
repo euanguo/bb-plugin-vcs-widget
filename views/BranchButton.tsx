@@ -15,7 +15,7 @@ import { BranchPopup } from "./BranchPopup";
 import type { MenuExtra } from "./BranchRow";
 import { ConfirmStep } from "./ConfirmStep";
 import { Button } from "@/components/ui/button";
-import { Icon } from "@/components/ui/icon";
+import { Icon } from "@bb/shared-ui/icon";
 import { Popover, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 

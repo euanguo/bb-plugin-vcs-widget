@@ -4,7 +4,7 @@ import type { ActionStatus } from "../hooks/use-vcs-actions";
 import { MIN_GIT_VERSION } from "../shared/constants";
 import { gitTooOld } from "../shared/model";
 import { Button } from "@/components/ui/button";
-import { Icon } from "@/components/ui/icon";
+import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@/lib/utils";
 
 interface StatusLineProps {

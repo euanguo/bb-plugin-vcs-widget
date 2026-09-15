@@ -5,6 +5,10 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./", import.meta.url)),
+      // bb plugin build replaces this import with the host's runtime shim.
+      // Vitest runs outside that host, so it exercises the identical vendored
+      // icon implementation instead.
+      "@bb/shared-ui/icon": fileURLToPath(new URL("./test/icon-shim.tsx", import.meta.url)),
     },
   },
   test: {

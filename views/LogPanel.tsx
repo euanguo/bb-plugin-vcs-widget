@@ -23,7 +23,7 @@ import { ConfirmStep } from "./ConfirmStep";
 import { NewBranchStep } from "./NewBranchStep";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { Icon } from "@/components/ui/icon";
+import { Icon } from "@bb/shared-ui/icon";
 import { Input } from "@/components/ui/input";
 import {
   Select,

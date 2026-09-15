@@ -15,7 +15,7 @@ import {
   ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
-import { Icon } from "@/components/ui/icon";
+import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@/lib/utils";
 
 /** Extra data a menu row carries: the mode of the Reset submenu. */

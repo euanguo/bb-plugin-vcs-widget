@@ -34,6 +34,7 @@
     "components",
     "*.test.ts",
     "*.test.tsx",
+    "bb-shared-ui-icon.d.ts",
     "vitest.config.ts"
   ]
 }

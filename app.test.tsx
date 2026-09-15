@@ -116,7 +116,7 @@ const sidebarThread = (environment: { id: string; branchName: string } | null) =
       isPinned: false,
       isArchived: false,
       environment: environment
-        ? { id: environment.id, name: "repo", branchName: environment.branchName, workspaceDisplayKind: "other" as const }
+        ? { id: environment.id, name: "repo", branchName: environment.branchName, providerId: null, workspaceDisplayKind: "other" as const }
         : null,
       host: { id: "h1", name: "laptop" },
       createdAt: 0,

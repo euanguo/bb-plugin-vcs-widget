@@ -3,7 +3,7 @@ import type { Tag, TagList } from "../contracts";
 import { isValidRefish } from "../shared/branch-name";
 import { matchScore } from "../shared/model";
 import { Button } from "@/components/ui/button";
-import { Icon } from "@/components/ui/icon";
+import { Icon } from "@bb/shared-ui/icon";
 import { Input } from "@/components/ui/input";
 
 interface RevisionStepProps {

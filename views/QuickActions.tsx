@@ -1,7 +1,7 @@
 import type { Overview } from "../contracts";
 import { matchScore, quickActionsFor, type QuickActionId } from "../shared/model";
 import { CommandGroup, CommandItem, CommandShortcut } from "@/components/ui/command";
-import { Icon, type IconName } from "@/components/ui/icon";
+import { Icon, type IconName } from "@bb/shared-ui/icon";
 
 const ICONS: Record<QuickActionId, IconName> = {
   update: "ArrowDown",

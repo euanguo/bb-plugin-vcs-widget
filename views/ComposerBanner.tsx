@@ -13,7 +13,7 @@ import type { rpcContract } from "../server";
 import { AGENT_ACTIONS, AGENT_ACTION_VARIANTS, type AgentActionVariant } from "../shared/constants";
 import { commitBannerFor } from "../shared/model";
 import { Button } from "@/components/ui/button";
-import { Icon } from "@/components/ui/icon";
+import { Icon } from "@bb/shared-ui/icon";
 
 export function ComposerBanner() {
   const view = useComposerView();

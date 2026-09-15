@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { experimental_Diff as Diff } from "@get-bb/plugin-sdk/app";
 import type { ChangeEntry } from "../contracts";
 import { Button } from "@/components/ui/button";
-import { Icon } from "@/components/ui/icon";
+import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@/lib/utils";
 import { diffSidesFor } from "../shared/model";
 import type { DiffSide } from "../shared/constants";
@@ -18,6 +18,7 @@ import { resolveDiffCollapsed, DIFF_FILES_INLINE_PATCH_MAX_FILES } from "../shar
 import type { DiffPatchState, UseDiffPatchesResult } from "../hooks/use-diff-patches";
 import { previewableImageMime } from "../shared/constants";
 import { ImageDiffPreview } from "./ImageDiffPreview";
+import { DiffQuoteSelection } from "./DiffQuoteSelection";
 
 interface ContinuousDiffStreamProps {
   threadId: string;
@@ -369,8 +370,10 @@ function DiffStreamBody({
   }
 
   return (
-    <div className="overflow-x-auto" data-testid={`vcs-stream-patch-${entry.path}`} data-side={side}>
-      <Diff patch={patchState.patch} path={entry.path} view="unified" overflow="scroll" />
-    </div>
+    <DiffQuoteSelection path={entry.path}>
+      <div className="overflow-x-auto" data-testid={`vcs-stream-patch-${entry.path}`} data-side={side}>
+        <Diff patch={patchState.patch} path={entry.path} view="unified" overflow="scroll" />
+      </div>
+    </DiffQuoteSelection>
   );
 }

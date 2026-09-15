@@ -4,7 +4,7 @@ import * as SelectPrimitive from "@radix-ui/react-select";
 import { cn } from "../../lib/utils";
 import { usePortalScopeProps } from "../../lib/portal-scope";
 import { CONTROL_HOVER_TRANSITION } from "./motion.js";
-import { Icon } from "../../components/ui/icon.js";
+import { Icon } from "@bb/shared-ui/icon";
 
 const Select = SelectPrimitive.Root;
 

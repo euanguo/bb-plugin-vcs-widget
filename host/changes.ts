@@ -312,7 +312,9 @@ export async function imagePreview(
           readImageSide(context, `:${input.path}`, MAX_IMAGE_BYTES),
         ])
       : await Promise.all([
-          readImageSide(context, `:${oldSpec}`, MAX_IMAGE_BYTES),
+          // The index is keyed by the path the row now represents. `oldPath`
+          // belongs only to the HEAD → index rename comparison above.
+          readImageSide(context, `:${input.path}`, MAX_IMAGE_BYTES),
           readWorktreeImage(join(context.repo.repoRoot, input.path), MAX_IMAGE_BYTES),
         ]);
   return { ok: true, path: input.path, mimeType: input.mimeType, old: oldSide, new: newSide };

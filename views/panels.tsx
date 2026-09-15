@@ -9,7 +9,7 @@ import { errorMessage } from "../lib/errors";
 import type { rpcContract } from "../server";
 import { refLabel } from "../shared/model";
 import { parseCompareParams, parseDiffParams } from "../shared/panel-params";
-import { Icon } from "@/components/ui/icon";
+import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@/lib/utils";
 
 interface PanelProps {

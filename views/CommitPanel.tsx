@@ -25,8 +25,16 @@ import {
   statusLetter,
   type FileMenuItemId,
 } from "../shared/model";
+import { groupChanges, isGroupingMode, sortGroupsByWeight, type GroupingMode } from "../shared/grouping";
 import { ConfirmStep } from "./ConfirmStep";
 import { ContinuousDiffStream } from "./ContinuousDiffStream";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -146,6 +154,8 @@ function Row({ entry, selected, disabled, onToggle, onSelect, onDiscard, onMenu 
 
 interface GroupProps {
   title: string;
+  /** Directory depth, so a nested group indents its header. */
+  depth: number;
   entries: ChangeEntry[];
   selected: string | null;
   disabled: boolean;
@@ -159,14 +169,17 @@ interface GroupProps {
   onDiscardAll: ((entries: ChangeEntry[]) => void) | null;
 }
 
-function Group({ title, entries, selected, disabled, onToggleAll, onToggle, onSelect, onDiscard, onMenu, onDiscardAll }: GroupProps) {
+function Group({ title, depth, entries, selected, disabled, onToggleAll, onToggle, onSelect, onDiscard, onMenu, onDiscardAll }: GroupProps) {
   if (entries.length === 0) return null;
   const allStaged = entries.every((entry) => stageState(entry) === "staged");
   const noneStaged = entries.every((entry) => stageState(entry) === "unstaged");
   const allUntracked = entries.every((entry) => entry.kind === "untracked");
   return (
     <section aria-label={title}>
-      <header className="group/header flex items-center gap-2 px-2 py-1 text-[11px] font-medium text-muted-foreground">
+      <header
+        className="group/header flex items-center gap-2 py-1 pr-2 text-[11px] font-medium text-muted-foreground"
+        style={{ paddingLeft: `${8 + depth * 12}px` }}
+      >
         <Checkbox
           checked={allStaged ? true : noneStaged ? false : "indeterminate"}
           aria-label={allStaged ? `Unstage all in ${title}` : `Stage all in ${title}`}
@@ -257,14 +270,14 @@ export function CommitPanel({ threadId }: PanelProps) {
   const changesUpdatedAt = changes;
 
   const files = useMemo(() => (changes?.ok ? changes.files : []), [changes]);
-  const groups = useMemo(
-    () => ({
-      changes: files.filter((entry) => entry.kind === "tracked"),
-      untracked: files.filter((entry) => entry.kind === "untracked"),
-      conflicts: files.filter((entry) => entry.kind === "conflicted"),
-    }),
-    [files],
-  );
+  // How the file list is grouped. Directory answers the flat-list problem:
+  // sixty files in one column say nothing about where the work is.
+  const [grouping, setGrouping] = useState<GroupingMode>("status");
+  const [heaviestFirst, setHeaviestFirst] = useState(false);
+  const groups = useMemo(() => {
+    const grouped = groupChanges(files, grouping);
+    return heaviestFirst ? sortGroupsByWeight(grouped) : grouped;
+  }, [files, grouping, heaviestFirst]);
   const stagedCount = files.filter(isStaged).length;
   // The stream reads one side at a time, which is what lets a batch read stay
   // one host call per page. Unstaged first: reviewing what is not yet in the
@@ -483,9 +496,53 @@ export function CommitPanel({ threadId }: PanelProps) {
             <Empty>Nothing to commit: the working tree is clean.</Empty>
           ) : (
             <>
-              <Group title="Conflicts" entries={groups.conflicts} selected={selected} disabled={busy} onToggleAll={toggleAll} onToggle={toggle} onSelect={(next) => { setSelected(next.path); setScrollToPath(next.path); }} onDiscard={discardOne} onMenu={onFileMenu} onDiscardAll={null} />
-              <Group title="Changes" entries={groups.changes} selected={selected} disabled={busy} onToggleAll={toggleAll} onToggle={toggle} onSelect={(next) => { setSelected(next.path); setScrollToPath(next.path); }} onDiscard={discardOne} onMenu={onFileMenu} onDiscardAll={discardAll} />
-              <Group title="Unversioned files" entries={groups.untracked} selected={selected} disabled={busy} onToggleAll={toggleAll} onToggle={toggle} onSelect={(next) => { setSelected(next.path); setScrollToPath(next.path); }} onDiscard={discardOne} onMenu={onFileMenu} onDiscardAll={discardAll} />
+              <div className="flex items-center gap-1 border-b border-border px-2 py-1">
+                <Select value={grouping} onValueChange={(value) => { if (isGroupingMode(value)) setGrouping(value); }}>
+                  <SelectTrigger
+                    aria-label="Group changed files by"
+                    className="h-6 min-w-0 flex-1 px-1 text-xs"
+                    data-testid="vcs-grouping-mode"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="status">By status</SelectItem>
+                    <SelectItem value="directory">By directory</SelectItem>
+                    <SelectItem value="flat">Flat</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button
+                  type="button"
+                  variant={heaviestFirst ? "secondary" : "ghost"}
+                  size="sm"
+                  className="h-6 shrink-0 px-2 text-xs"
+                  aria-pressed={heaviestFirst}
+                  aria-label="Order groups by how many files each holds"
+                  onClick={() => setHeaviestFirst((value) => !value)}
+                  data-testid="vcs-grouping-heaviest"
+                >
+                  <Icon name="ArrowUpDown" className="size-3.5" />
+                </Button>
+              </div>
+              {groups.map((group) => (
+                <Group
+                  key={group.key}
+                  title={group.title}
+                  depth={group.depth}
+                  entries={group.entries}
+                  selected={selected}
+                  disabled={busy}
+                  onToggleAll={toggleAll}
+                  onToggle={toggle}
+                  onSelect={(next) => {
+                    setSelected(next.path);
+                    setScrollToPath(next.path);
+                  }}
+                  onDiscard={discardOne}
+                  onMenu={onFileMenu}
+                  onDiscardAll={group.entries.some((entry) => entry.kind === "conflicted") ? null : discardAll}
+                />
+              ))}
               {changes.truncated ? <p className="px-2 py-1 text-xs text-muted-foreground">Only the first {files.length} files are listed.</p> : null}
             </>
           )}

@@ -578,6 +578,40 @@ export const diffBatchEntrySchema = z
   .strict();
 
 /**
+ * One side of a binary file as base64, or null when that side has nothing to
+ * show (the file is new or deleted there, unreadable, or too large). The
+ * bytes travel base64 rather than as a string so an image survives the trip.
+ */
+export const imageSideSchema = z
+  .object({ base64: z.string(), sizeBytes: z.number().int().nonnegative() })
+  .strict();
+
+const imagePreviewFields = {
+  path: repoFilePathSchema,
+  oldPath: repoFilePathSchema.nullable(),
+  /** Which diff side's two revisions the preview compares. */
+  side: diffSideSchema,
+  mimeType: z.string(),
+};
+
+export const imagePreviewSchema = z.union([
+  z
+    .object({
+      ok: z.literal(true),
+      path: z.string(),
+      mimeType: z.string(),
+      /** The old side, null when the file is new. */
+      old: imageSideSchema.nullable(),
+      /** The new side, null when the file is deleted. */
+      new: imageSideSchema.nullable(),
+    })
+    .strict(),
+  failure,
+]);
+
+export type ImagePreview = z.infer<typeof imagePreviewSchema>;
+
+/**
  * A batch read for the continuous stream: one side, many paths, one call.
  * `paths` is capped at bb's own per-request limit so a page can never grow
  * past what one host call handles.
@@ -761,6 +795,10 @@ export const rpcContract = defineRpcContract({
     input: threadInput.extend(diffBatchFields).strict(),
     output: diffBatchResultSchema,
   },
+  imagePreview: {
+    input: threadInput.extend(imagePreviewFields).strict(),
+    output: imagePreviewSchema,
+  },
   stage: {
     input: threadInput.extend(stageFields).strict(),
     output: actionResultSchema,
@@ -933,6 +971,10 @@ export const hostContract = defineRpcContract({
   diffFiles: {
     input: repoInput.extend(diffBatchFields).strict(),
     output: diffBatchResultSchema,
+  },
+  imagePreview: {
+    input: repoInput.extend(imagePreviewFields).strict(),
+    output: imagePreviewSchema,
   },
   stage: {
     input: repoInput.extend(stageFields).strict(),

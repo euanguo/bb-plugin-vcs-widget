@@ -693,6 +693,64 @@ describe("compare and diff", () => {
     const tooMany = Array.from({ length: 51 }, (_, index) => `f${index}.txt`);
     await expect(harness.experimental_call("diffFiles", { repoPath: repo, paths: tooMany, side: "index" })).rejects.toThrow();
   });
+
+  it("returns both sides of an image as bytes that survive the trip", async () => {
+    // A real PNG header plus a byte no utf8 decode can round-trip. Reading
+    // this through a string would replace that byte with U+FFFD.
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe, 0x80]);
+    const changed = Buffer.from([...bytes, 0x01, 0x02, 0xff]);
+    const headBefore = await git(repo, "rev-parse", "HEAD");
+    // The committed side has to exist in a commit, so this stages and commits
+    // the first version; the commit is undone below because `repo` is shared
+    // with the tests that follow and they assert on its history.
+    await writeFile(join(repo, "logo.png"), bytes);
+    await git(repo, "add", "logo.png");
+    await git(repo, "commit", "-q", "-m", "add an image");
+    await writeFile(join(repo, "logo.png"), changed);
+    try {
+      const preview = await harness.experimental_call("imagePreview", {
+        repoPath: repo,
+        path: "logo.png",
+        oldPath: null,
+        side: "worktree",
+        mimeType: "image/png",
+      });
+      expect(preview.ok).toBe(true);
+      if (!preview.ok) return;
+      // The committed side is HEAD's blob; the new side is the file on disk.
+      expect(preview.old?.base64).toBe(bytes.toString("base64"));
+      expect(preview.new?.base64).toBe(changed.toString("base64"));
+      expect(preview.old?.sizeBytes).toBe(bytes.length);
+      expect(preview.new?.sizeBytes).toBe(changed.length);
+      // The bytes must survive: base64 of the disk file decodes back exactly.
+      expect(Buffer.from(preview.new!.base64, "base64")).toEqual(changed);
+    } finally {
+      await git(repo, "reset", "-q", "--hard", headBefore);
+      await rm(join(repo, "logo.png"), { force: true });
+    }
+  });
+
+  it("answers null for an image side that is not there", async () => {
+    // A file with no committed history has no old side to show.
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    await writeFile(join(repo, "fresh.png"), bytes);
+    try {
+      const preview = await harness.experimental_call("imagePreview", {
+        repoPath: repo,
+        path: "fresh.png",
+        oldPath: null,
+        side: "worktree",
+        mimeType: "image/png",
+      });
+      expect(preview.ok).toBe(true);
+      if (!preview.ok) return;
+      // The index has nothing at this path, so the old side is absent.
+      expect(preview.old).toBeNull();
+      expect(preview.new?.sizeBytes).toBe(bytes.length);
+    } finally {
+      await rm(join(repo, "fresh.png"), { force: true });
+    }
+  });
 });
 
 describe("commit panel", () => {

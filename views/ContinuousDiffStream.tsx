@@ -16,8 +16,11 @@ import { diffSidesFor } from "../shared/model";
 import type { DiffSide } from "../shared/constants";
 import { resolveDiffCollapsed, DIFF_FILES_INLINE_PATCH_MAX_FILES } from "../shared/diff-tiering";
 import type { DiffPatchState, UseDiffPatchesResult } from "../hooks/use-diff-patches";
+import { previewableImageMime } from "../shared/constants";
+import { ImageDiffPreview } from "./ImageDiffPreview";
 
 interface ContinuousDiffStreamProps {
+  threadId: string;
   files: readonly ChangeEntry[];
   side: DiffSide;
   patches: UseDiffPatchesResult;
@@ -39,6 +42,7 @@ function initialCollapsed(entry: ChangeEntry, fileCount: number): boolean {
 }
 
 export function ContinuousDiffStream({
+  threadId,
   files,
   side,
   patches,
@@ -154,6 +158,7 @@ export function ContinuousDiffStream({
           {files.map((entry) => (
             <DiffStreamRow
               key={entry.path}
+              threadId={threadId}
               entry={entry}
               side={side}
               patchState={patches.getPatchState(entry.path)}
@@ -175,6 +180,7 @@ export function ContinuousDiffStream({
 }
 
 interface DiffStreamRowProps {
+  threadId: string;
   entry: ChangeEntry;
   side: DiffSide;
   patchState: DiffPatchState;
@@ -215,6 +221,7 @@ const STATUS_CLASS: Record<string, string> = {
 };
 
 function DiffStreamRow({
+  threadId,
   entry,
   side,
   patchState,
@@ -270,6 +277,7 @@ function DiffStreamRow({
       </header>
       {isCollapsed ? null : (
         <DiffStreamBody
+          threadId={threadId}
           entry={entry}
           side={side}
           patchState={patchState}
@@ -285,6 +293,7 @@ function DiffStreamRow({
 const NOTICE_CLASS = "flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-3 text-xs text-muted-foreground";
 
 function DiffStreamBody({
+  threadId,
   entry,
   side,
   patchState,
@@ -292,6 +301,7 @@ function DiffStreamBody({
   onRetry,
   onOpenFile,
 }: {
+  threadId: string;
   entry: ChangeEntry;
   side: DiffSide;
   patchState: DiffPatchState;
@@ -324,6 +334,20 @@ function DiffStreamBody({
   }
 
   if (patchState.binary === true) {
+    // A previewable image gets a picture; anything else (a zip, a font, a
+    // PDF) keeps the plain notice, because there is nothing to render.
+    const mimeType = previewableImageMime(entry.path) ?? previewableImageMime(entry.oldPath);
+    if (mimeType !== null) {
+      return (
+        <ImageDiffPreview
+          threadId={threadId}
+          path={entry.path}
+          oldPath={entry.oldPath}
+          side={side}
+          mimeType={mimeType}
+        />
+      );
+    }
     return (
       <div className={NOTICE_CLASS} data-testid={`vcs-stream-binary-${entry.path}`}>
         <span>Binary file.</span>

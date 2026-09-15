@@ -471,6 +471,7 @@ export function CommitPanel({ threadId }: PanelProps) {
             </div>
           </div>
           <ContinuousDiffStream
+            threadId={threadId}
             files={streamFiles}
             side={streamSide}
             patches={patches}

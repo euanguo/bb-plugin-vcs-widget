@@ -30,6 +30,21 @@ export interface GitRunResult {
   cancelled: boolean;
 }
 
+/**
+ * The same run, with stdout kept as bytes. Reading a binary file (an image,
+ * a font) through a utf8 string would replace every invalid sequence with
+ * U+FFFD and the file could not be shown; the patch side of the plugin is
+ * text and never needs this.
+ */
+export interface GitRunBytesResult {
+  argv: string[];
+  code: number | null;
+  stdout: Buffer;
+  stderr: string;
+  timedOut: boolean;
+  cancelled: boolean;
+}
+
 export class GitSpawnError extends Error {
   constructor(message: string, readonly argv: string[]) {
     super(message);
@@ -57,16 +72,60 @@ const useProcessGroups = process.platform !== "win32";
  * Runs git and resolves with its outcome, never rejecting for a non-zero
  * exit. Rejects only when git cannot be spawned at all or floods the output
  * limit. A zero or negative deadline resolves as timed out without spawning.
+ *
+ * stdout is decoded as utf8 here; `runGitBytes` is the same run for callers
+ * that need the bytes.
  */
-export function runGit(args: readonly string[], options: GitRunOptions): Promise<GitRunResult> {
+export async function runGit(args: readonly string[], options: GitRunOptions): Promise<GitRunResult> {
+  const raw = await runGitRaw(args, options);
+  return {
+    argv: raw.argv,
+    code: raw.code,
+    stdout: raw.stdout.toString("utf8"),
+    stderr: raw.stderr,
+    timedOut: raw.timedOut,
+    cancelled: raw.cancelled,
+  };
+}
+
+/**
+ * The same run with stdout left as bytes, for reading a file git holds (an
+ * image's old side) rather than a patch. Decoding those bytes as utf8 would
+ * replace every invalid sequence with U+FFFD and the file could not be shown.
+ */
+export async function runGitBytes(
+  args: readonly string[],
+  options: GitRunOptions,
+): Promise<GitRunBytesResult> {
+  const raw = await runGitRaw(args, options);
+  return {
+    argv: raw.argv,
+    code: raw.code,
+    stdout: raw.stdout,
+    stderr: raw.stderr,
+    timedOut: raw.timedOut,
+    cancelled: raw.cancelled,
+  };
+}
+
+interface GitRunRawResult {
+  argv: string[];
+  code: number | null;
+  stdout: Buffer;
+  stderr: string;
+  timedOut: boolean;
+  cancelled: boolean;
+}
+
+function runGitRaw(args: readonly string[], options: GitRunOptions): Promise<GitRunRawResult> {
   const argv = [...args];
   return new Promise((resolve, reject) => {
     if (options.signal?.aborted) {
-      resolve({ argv, code: null, stdout: "", stderr: "", timedOut: false, cancelled: true });
+      resolve({ argv, code: null, stdout: Buffer.alloc(0), stderr: "", timedOut: false, cancelled: true });
       return;
     }
     if (options.timeoutMs <= 0) {
-      resolve({ argv, code: null, stdout: "", stderr: "", timedOut: true, cancelled: false });
+      resolve({ argv, code: null, stdout: Buffer.alloc(0), stderr: "", timedOut: true, cancelled: false });
       return;
     }
 
@@ -156,7 +215,7 @@ export function runGit(args: readonly string[], options: GitRunOptions): Promise
 
     child.on("close", (code, signal) => {
       finish(() => {
-        const out = Buffer.concat(stdout).toString("utf8");
+        const out = Buffer.concat(stdout);
         const err = Buffer.concat(stderr).toString("utf8");
         if (cancelled) {
           resolve({ argv, code: null, stdout: out, stderr: err, timedOut: false, cancelled: true });

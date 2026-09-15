@@ -474,6 +474,9 @@ export default async function plugin(bb: BbPluginApi) {
     diffFiles({ threadId, ...input }) {
       return withReadTarget(threadId, (repo) => host.call("diffFiles", { repoPath: repo.repoPath, ...input }, { hostId: repo.hostId }), readFailure);
     },
+    imagePreview({ threadId, ...input }) {
+      return withReadTarget(threadId, (repo) => host.call("imagePreview", { repoPath: repo.repoPath, ...input }, { hostId: repo.hostId }), readFailure);
+    },
 
     stage({ threadId, paths }) {
       return withTarget(threadId, "stage", (repo) => host.call("stage", { repoPath: repo.repoPath, paths }, { hostId: repo.hostId }));

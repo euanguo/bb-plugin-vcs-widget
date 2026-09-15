@@ -5,8 +5,8 @@
 // path from `git status` can never turn into a glob or pathspec magic.
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import type { ActionResult, ChangesResult, CommitInput, DiffBatchResult, DiscardInput, FileDiff, GitError, Head } from "../contracts";
-import { CHANGES_LIMIT, type DiffSide } from "../shared/constants";
+import type { ActionResult, ChangesResult, CommitInput, DiffBatchResult, DiscardInput, FileDiff, GitError, Head, ImagePreview } from "../contracts";
+import { CHANGES_LIMIT, MAX_IMAGE_BYTES, type DiffSide } from "../shared/constants";
 import { splitPatchIntoSections } from "../shared/diff-tiering";
 import { classifyGitFailure, pluginGitError, type GitPhase } from "../shared/git-errors";
 import { discardPlans, type GitPlan } from "../shared/model";
@@ -23,7 +23,7 @@ import {
   type ActionContext,
   type PreparedJob,
 } from "./actions";
-import { capPatch, hasNul, readFailure, showOrEmpty, SIDE_LIMIT_BYTES } from "./diff-text";
+import { capPatch, hasNul, readFailure, readImageSide, readWorktreeImage, showOrEmpty, SIDE_LIMIT_BYTES } from "./diff-text";
 import { gitReadOrNull, runGit } from "./git";
 import { detectOperation, isIndexLocked, preflight } from "./repo";
 
@@ -288,4 +288,32 @@ export async function prepareCommit(
     }),
     message,
   );
+}
+
+
+/**
+ * Both sides of a binary file as base64, for the panel's image preview.
+ *
+ * The two sides are the ones the requested diff side compares, so the picture
+ * agrees with the patch a text file would have shown: the `index` side is
+ * HEAD against the index, the `worktree` side is the index against the file
+ * on disk. `mimeType` decides whether anything is read at all — a format the
+ * panel cannot render costs no git call and no bytes.
+ */
+export async function imagePreview(
+  context: ActionContext,
+  input: { path: string; oldPath: string | null; side: DiffSide; mimeType: string },
+): Promise<ImagePreview> {
+  const oldSpec = input.oldPath === null ? input.path : input.oldPath;
+  const [oldSide, newSide] =
+    input.side === "index"
+      ? await Promise.all([
+          readImageSide(context, `HEAD:${oldSpec}`, MAX_IMAGE_BYTES),
+          readImageSide(context, `:${input.path}`, MAX_IMAGE_BYTES),
+        ])
+      : await Promise.all([
+          readImageSide(context, `:${oldSpec}`, MAX_IMAGE_BYTES),
+          readWorktreeImage(join(context.repo.repoRoot, input.path), MAX_IMAGE_BYTES),
+        ]);
+  return { ok: true, path: input.path, mimeType: input.mimeType, old: oldSide, new: newSide };
 }

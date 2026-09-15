@@ -104,3 +104,33 @@ export const MIN_GIT_VERSION = { major: 2, minor: 24 } as const;
  * the continuous stream can never ask for more than a host call handles.
  */
 export const DIFF_PATCH_MAX_PATHS_PER_REQUEST = 50;
+
+/**
+ * Image extensions the panel previews instead of saying "Binary file.".
+ *
+ * Deliberately the same set bb's own diff panel previews, so a file shows a
+ * picture in one panel and a notice in the other only where the format really
+ * is not renderable. SVG is absent on purpose: it is text, so the diff itself
+ * is the more useful view.
+ */
+export const PREVIEWABLE_IMAGE_MIME: Readonly<Record<string, string>> = {
+  avif: "image/avif",
+  bmp: "image/bmp",
+  gif: "image/gif",
+  ico: "image/x-icon",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+};
+
+/** The image's MIME type, or null when the path is not a previewable image. */
+export function previewableImageMime(path: string | null | undefined): string | null {
+  if (path === null || path === undefined) return null;
+  const dot = path.lastIndexOf(".");
+  if (dot <= 0) return null;
+  return PREVIEWABLE_IMAGE_MIME[path.slice(dot + 1).toLowerCase()] ?? null;
+}
+
+/** One side of a binary file, as bytes the viewer can turn into a data URL. */
+export const MAX_IMAGE_BYTES = 2 * 1024 * 1024;

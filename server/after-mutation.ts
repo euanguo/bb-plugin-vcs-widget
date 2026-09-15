@@ -9,6 +9,18 @@ import { CHANGED_CHANNEL, type ChangedPayload } from "../shared/constants";
 export const STATUS_CACHE_TTL_MS = 3_000;
 const SECOND_NUDGE_DELAY_MS = STATUS_CACHE_TTL_MS + 200;
 
+/**
+ * Mutations that only touch the index or the working tree. They cannot change
+ * which branch HEAD points at, which is the one thing the delayed second
+ * nudge exists to refresh, so for these the second read and its `:settled`
+ * publish are dropped.
+ *
+ * This matters beyond tidiness: every publish makes the panel refetch the
+ * whole working tree, and a tick that lands 3.2 s later re-renders a list the
+ * reader is already working in.
+ */
+const INDEX_ONLY_REASONS: ReadonlySet<string> = new Set(["stage", "unstage", "discard"]);
+
 export function createAfterMutation(bb: BbPluginApi) {
   const timers = new Set<ReturnType<typeof setTimeout>>();
 
@@ -30,11 +42,13 @@ export function createAfterMutation(bb: BbPluginApi) {
   /** Call after every successful mutation on `environmentId`. */
   function afterMutation(environmentId: string, reason: string): void {
     void nudgeStatus(environmentId);
-    const timer = setTimeout(() => {
-      timers.delete(timer);
-      void nudgeStatus(environmentId).then(() => publish(environmentId, `${reason}:settled`));
-    }, SECOND_NUDGE_DELAY_MS);
-    timers.add(timer);
+    if (!INDEX_ONLY_REASONS.has(reason)) {
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        void nudgeStatus(environmentId).then(() => publish(environmentId, `${reason}:settled`));
+      }, SECOND_NUDGE_DELAY_MS);
+      timers.add(timer);
+    }
     publish(environmentId, reason);
   }
 

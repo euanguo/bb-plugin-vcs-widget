@@ -77,6 +77,12 @@ interface UseVcsActionsOptions {
    * bb stacks its toasts, so a toast there would cover the form it reports on.
    */
   quiet?: boolean;
+  /**
+   * Show a stage/unstage before the server confirms it, and roll it back if
+   * the call fails. Only the commit panel passes this: the branch popup has
+   * no list to keep in step.
+   */
+  applyStaged?: (paths: readonly string[], staged: boolean) => () => void;
 }
 
 interface EffectiveSettings {
@@ -112,7 +118,7 @@ export function toRef(entry: BranchEntry): BranchRef {
     : { kind: "remote", remote: entry.branch.remote, branch: entry.branch.branch };
 }
 
-export function useVcsActions({ threadId, overview, applyOverview, onCheckedOut, waitForJob, quiet = false }: UseVcsActionsOptions) {
+export function useVcsActions({ threadId, overview, applyOverview, onCheckedOut, waitForJob, quiet = false, applyStaged }: UseVcsActionsOptions) {
   const rpc = useRpc<typeof rpcContract>();
   const { values } = useSettings();
   const settings = readSettings(values);
@@ -538,13 +544,26 @@ export function useVcsActions({ threadId, overview, applyOverview, onCheckedOut,
   // -------------------------------------------------------------------------
 
   const stage = useCallback(
-    (paths: string[]) => execute("Staging…", () => rpc.call("stage", { threadId, paths })),
-    [execute, rpc, threadId],
+    (paths: string[]) => {
+      const rollback = applyStaged?.(paths, true);
+      return execute("Staging…", () => rpc.call("stage", { threadId, paths })).then((result) => {
+        // A failed call leaves the tree as it was, so the tick must come back off.
+        if (result !== null && !result.ok) rollback?.();
+        return result;
+      });
+    },
+    [applyStaged, execute, rpc, threadId],
   );
 
   const unstage = useCallback(
-    (paths: string[]) => execute("Unstaging…", () => rpc.call("unstage", { threadId, paths })),
-    [execute, rpc, threadId],
+    (paths: string[]) => {
+      const rollback = applyStaged?.(paths, false);
+      return execute("Unstaging…", () => rpc.call("unstage", { threadId, paths })).then((result) => {
+        if (result !== null && !result.ok) rollback?.();
+        return result;
+      });
+    },
+    [applyStaged, execute, rpc, threadId],
   );
 
   const files = (count: number) => `${count} file${count === 1 ? "" : "s"}`;

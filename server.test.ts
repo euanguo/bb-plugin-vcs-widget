@@ -380,6 +380,18 @@ describe("server", () => {
     expect(hostCalls[5]?.input).toEqual({ repoPath: "/repo", message: "Subject\n\nBody", amend: false, signoff: true, noVerify: false, timeoutMs: 120_000 });
     await expect(harness.behavior.callRpc("commit", { threadId: "t1", message: "   ", amend: false, signoff: false, noVerify: false })).rejects.toThrow();
     await expect(harness.behavior.callRpc("stage", { threadId: "t1", paths: ["/etc/passwd"] })).rejects.toThrow();
+    // An index-only mutation publishes once. The delayed second nudge exists
+    // to follow a branch change in bb's sidebar, which staging cannot make,
+    // and every publish makes the panel refetch its whole file list.
+    const afterStage = harness.realtimeSignals.filter(
+      (signal) => (signal.payload as { reason?: string }).reason === "stage",
+    );
+    expect(afterStage).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(3_300);
+    const settled = harness.realtimeSignals.filter(
+      (signal) => (signal.payload as { reason?: string }).reason === "stage:settled",
+    );
+    expect(settled).toHaveLength(0);
   });
 
   it("forwards the log panel: reads, and its mutations with a change publish", async () => {

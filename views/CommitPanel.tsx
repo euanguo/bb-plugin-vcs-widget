@@ -159,6 +159,8 @@ interface GroupProps {
   entries: ChangeEntry[];
   selected: string | null;
   disabled: boolean;
+  /** Paths with a stage/unstage in flight; only these rows grey out. */
+  pendingPaths: ReadonlySet<string>;
   /** The header checkbox: stage all, or unstage all when everything is staged. */
   onToggleAll: (entries: ChangeEntry[], stageThem: boolean) => void;
   onToggle: (entry: ChangeEntry) => void;
@@ -169,7 +171,7 @@ interface GroupProps {
   onDiscardAll: ((entries: ChangeEntry[]) => void) | null;
 }
 
-function Group({ title, depth, entries, selected, disabled, onToggleAll, onToggle, onSelect, onDiscard, onMenu, onDiscardAll }: GroupProps) {
+function Group({ title, depth, entries, selected, disabled, pendingPaths, onToggleAll, onToggle, onSelect, onDiscard, onMenu, onDiscardAll }: GroupProps) {
   if (entries.length === 0) return null;
   const allStaged = entries.every((entry) => stageState(entry) === "staged");
   const noneStaged = entries.every((entry) => stageState(entry) === "unstaged");
@@ -207,7 +209,7 @@ function Group({ title, depth, entries, selected, disabled, onToggleAll, onToggl
             key={entry.path}
             entry={entry}
             selected={selected === entry.path}
-            disabled={disabled}
+            disabled={disabled || pendingPaths.has(entry.path)}
             onToggle={onToggle}
             onSelect={onSelect}
             onDiscard={onDiscard}
@@ -219,37 +221,21 @@ function Group({ title, depth, entries, selected, disabled, onToggleAll, onToggl
   );
 }
 
-function DiffView({ diff }: { diff: FileDiff | "loading" | null }) {
-  if (diff === null) return <Empty>Select a file to see its diff.</Empty>;
-  if (diff === "loading") return <Empty>Reading diff…</Empty>;
-  if (!diff.ok) return <p className="p-4 text-sm text-destructive">{diff.error.message}</p>;
-  if (diff.binary) return <Empty>Binary file.</Empty>;
-  if (diff.patch.trim() === "") return <Empty>No textual difference on this side.</Empty>;
-  return (
-    <div className="min-h-0 flex-1 overflow-auto" data-testid="vcs-patch">
-      {diff.truncated ? <p className="px-3 py-1 text-xs text-muted-foreground">Diff truncated at 1 MiB.</p> : null}
-      <Diff
-        patch={diff.patch}
-        path={diff.path}
-        view="unified"
-        overflow="scroll"
-        {...(diff.contents === null ? {} : { experimental_fullFileContents: diff.contents })}
-      />
-    </div>
-  );
-}
-
 export function CommitPanel({ threadId }: PanelProps) {
   const rpc = useRpc<typeof rpcContract>();
   const sidebar = useSidebarThread(threadId);
-  const { changes, loading, error, refetch } = useChanges(threadId);
+  const { changes, loading, error, refetch, applyStaged } = useChanges(threadId);
   const { overview, applyOverview } = useOverview({ threadId, environmentId: sidebar.environmentId, enabled: true });
   const jobs = useJobs(threadId);
   // Quiet: the status line under the buttons reports every outcome, and bb's
   // toasts would stack right over this form.
-  const actions = useVcsActions({ threadId, overview, applyOverview, onCheckedOut: () => undefined, waitForJob: jobs.waitFor, quiet: true });
+  const actions = useVcsActions({ threadId, overview, applyOverview, onCheckedOut: () => undefined, waitForJob: jobs.waitFor, quiet: true, applyStaged });
 
   const [selected, setSelected] = useState<string | null>(null);
+  // Which paths have a stage/unstage in flight. The list disables only those
+  // rows, not every row: a global `busy` turned the whole list half-opaque
+  // for the length of one round trip, which is the flicker this fixes.
+  const [pendingPaths, setPendingPaths] = useState<ReadonlySet<string>>(() => new Set());
   // A file-list click scrolls the stream to that file rather than swapping
   // what the pane shows; the request is cleared once it has been honoured.
   const [scrollToPath, setScrollToPath] = useState<string | null>(null);
@@ -299,8 +285,16 @@ export function CommitPanel({ threadId }: PanelProps) {
   const toggle = useCallback(
     (target: ChangeEntry) => {
       const state = stageState(target);
-      if (target.kind === "conflicted" || state === "unstaged") void actions.stage(pathsOf(target));
-      else void actions.unstage(pathsOf(target));
+      const paths = pathsOf(target);
+      setPendingPaths((current) => new Set([...current, ...paths]));
+      const clear = () =>
+        setPendingPaths((current) => {
+          const next = new Set(current);
+          for (const path of paths) next.delete(path);
+          return next;
+        });
+      const run = target.kind === "conflicted" || state === "unstaged" ? actions.stage(paths) : actions.unstage(paths);
+      void run.finally(clear);
     },
     [actions],
   );
@@ -310,8 +304,15 @@ export function CommitPanel({ threadId }: PanelProps) {
         .filter((candidate) => (stageThem ? stageState(candidate) !== "staged" : stageState(candidate) !== "unstaged"))
         .flatMap(pathsOf);
       if (paths.length === 0) return;
-      if (stageThem) void actions.stage(paths);
-      else void actions.unstage(paths);
+      setPendingPaths((current) => new Set([...current, ...paths]));
+      const clear = () =>
+        setPendingPaths((current) => {
+          const next = new Set(current);
+          for (const path of paths) next.delete(path);
+          return next;
+        });
+      const run = stageThem ? actions.stage(paths) : actions.unstage(paths);
+      void run.finally(clear);
     },
     [actions],
   );
@@ -532,6 +533,7 @@ export function CommitPanel({ threadId }: PanelProps) {
                   entries={group.entries}
                   selected={selected}
                   disabled={busy}
+                  pendingPaths={pendingPaths}
                   onToggleAll={toggleAll}
                   onToggle={toggle}
                   onSelect={(next) => {

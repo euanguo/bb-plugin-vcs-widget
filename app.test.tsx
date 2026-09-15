@@ -802,8 +802,27 @@ describe("CommitPanel", () => {
     await waitFor(() => expect(calls(slot, "stage")).toEqual([{ threadId: "t1", paths: ["edited.txt"] }]));
     await user.click(slot.getByLabelText("Unstage staged.txt"));
     await waitFor(() => expect(calls(slot, "unstage")).toEqual([{ threadId: "t1", paths: ["staged.txt"] }]));
+    // Both ticks are still optimistic here (no server read has landed), so the
+    // group now holds staged.txt as unstaged, edited.txt as staged, and
+    // both.txt as partially staged. "Stage all" therefore covers the first
+    // and third; edited.txt is already staged.
     await user.click(slot.getByLabelText("Stage all in Changes"));
-    await waitFor(() => expect(calls(slot, "stage").at(-1)).toEqual({ threadId: "t1", paths: ["edited.txt", "both.txt"] }));
+    await waitFor(() => expect(calls(slot, "stage").at(-1)).toEqual({ threadId: "t1", paths: ["staged.txt", "both.txt"] }));
+  });
+
+  it("shows a tick at once, before the server's own view of the tree arrives", async () => {
+    const user = userEvent.setup();
+    const slot = renderCommitPanel();
+    const box = (await slot.findByLabelText("Stage edited.txt")) as HTMLButtonElement;
+    // The fixture has edited.txt unstaged; the checkbox reflects that.
+    expect(box.getAttribute("aria-checked")).toBe("false");
+    await user.click(box);
+    // The tick lands without waiting for a `changes` read, and the row is not
+    // left disabled: a global busy flag greyed out every row for the length
+    // of the round trip, which is the flicker this avoids.
+    await waitFor(() => expect(box.getAttribute("aria-checked")).toBe("true"));
+    expect(box.disabled).toBe(false);
+    expect(slot.getByLabelText("Unstage edited.txt")).toBeTruthy();
   });
 
   it("previews the staged side of a selected file and lets the other side be picked", async () => {

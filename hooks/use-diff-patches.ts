@@ -50,14 +50,20 @@ export function useDiffPatches(
 ): UseDiffPatchesResult {
   const rpc = useRpc<typeof rpcContract>();
   const [patches, setPatches] = useState<Map<string, DiffPatchState>>(new Map());
-  const [freshness, setFreshness] = useState(0);
 
-  const identity = `${threadId}:${side}:${freshness}`;
+  // The view these patches describe. Changing it means a different repository
+  // or a different side of it, so nothing stored here is meaningful any more.
+  const identity = `${threadId}:${side}`;
   const identityRef = useRef(identity);
   const pendingRef = useRef<{ visible: string[]; overscan: string[] }>({ visible: [], overscan: [] });
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inFlightRef = useRef<Set<string>>(new Set());
   const controllersRef = useRef<Set<AbortController>>(new Set());
+  // Paths whose stored patch may describe a working tree that has since
+  // changed. They are re-read in place: the patch already on screen stays
+  // until the new one arrives, because blanking every card back to a loading
+  // state is what made staging one file look like the whole stream reloaded.
+  const staleRef = useRef<Set<string>>(new Set());
   // The debounce and the load/retry callbacks read the latest patches without
   // being re-created on every state change.
   const patchesRef = useRef(patches);
@@ -65,7 +71,7 @@ export function useDiffPatches(
     patchesRef.current = patches;
   }, [patches]);
 
-  // A new side or a new working-tree state makes every stored patch stale.
+  // A new thread or a new side makes every stored patch meaningless.
   useEffect(() => {
     identityRef.current = identity;
     if (timerRef.current !== null) {
@@ -75,6 +81,7 @@ export function useDiffPatches(
     for (const controller of controllersRef.current) controller.abort();
     controllersRef.current.clear();
     inFlightRef.current.clear();
+    staleRef.current.clear();
     setPatches(new Map());
   }, [identity]);
 
@@ -92,9 +99,16 @@ export function useDiffPatches(
       controllersRef.current.add(controller);
       for (const path of paths) inFlightRef.current.add(path);
       setPatches((previous) => {
+        let changed = false;
         const next = new Map(previous);
-        for (const path of paths) next.set(path, { status: "loading" });
-        return next;
+        for (const path of paths) {
+          // A re-read keeps what is already on screen. Only a first read has
+          // nothing to show and needs the loading state.
+          if (previous.get(path)?.status === "loaded") continue;
+          next.set(path, { status: "loading" });
+          changed = true;
+        }
+        return changed ? next : previous;
       });
       try {
         const result: DiffBatchResult = await rpc.call("diffFiles", {
@@ -106,35 +120,64 @@ export function useDiffPatches(
         // flight: the answer describes a repository state that is gone.
         if (controller.signal.aborted || identityRef.current !== requestedUnder) return;
         setPatches((previous) => {
+          let changed = false;
           const next = new Map(previous);
           if (!result.ok) {
             const message = result.error.message;
-            for (const path of paths) next.set(path, { status: "error", error: message });
-            return next;
+            for (const path of paths) {
+              // A re-read that failed leaves the patch already on screen.
+              if (previous.get(path)?.status === "loaded") continue;
+              next.set(path, { status: "error", error: message });
+              changed = true;
+            }
+            return changed ? next : previous;
           }
           const byPath = new Map(result.files.map((file) => [file.path, file]));
           for (const path of paths) {
             const file = byPath.get(path);
-            next.set(
-              path,
-              file === undefined
-                ? { status: "error", error: "No diff was available for this file." }
-                : { status: "loaded", patch: file.patch, truncated: file.truncated, binary: file.binary },
-            );
+            const current = previous.get(path);
+            if (file === undefined) {
+              if (current?.status === "loaded") continue;
+              next.set(path, { status: "error", error: "No diff was available for this file." });
+              changed = true;
+              continue;
+            }
+            // The same patch keeps the object it already had, so a re-read
+            // that finds nothing new does not re-render the row.
+            if (
+              current?.status === "loaded" &&
+              current.patch === file.patch &&
+              current.truncated === file.truncated &&
+              current.binary === file.binary
+            ) {
+              continue;
+            }
+            next.set(path, { status: "loaded", patch: file.patch, truncated: file.truncated, binary: file.binary });
+            changed = true;
           }
-          return next;
+          return changed ? next : previous;
         });
       } catch (caught) {
         if (controller.signal.aborted || identityRef.current !== requestedUnder) return;
         const message = errorMessage(caught) ?? "Failed to load file diff";
         setPatches((previous) => {
+          let changed = false;
           const next = new Map(previous);
-          for (const path of paths) next.set(path, { status: "error", error: message });
-          return next;
+          for (const path of paths) {
+            if (previous.get(path)?.status === "loaded") continue;
+            next.set(path, { status: "error", error: message });
+            changed = true;
+          }
+          return changed ? next : previous;
         });
       } finally {
         controllersRef.current.delete(controller);
         for (const path of paths) inFlightRef.current.delete(path);
+        // The answer landed under this identity, so these paths are current.
+        // A changed identity cleared the set already.
+        if (identityRef.current === requestedUnder) {
+          for (const path of paths) staleRef.current.delete(path);
+        }
       }
     },
     [rpc, threadId, side],
@@ -153,8 +196,10 @@ export function useDiffPatches(
     }
     const toFetch = ordered.filter((path) => {
       if (inFlightRef.current.has(path)) return false;
+      // A stale patch is re-read in place; a loaded one that is not stale is
+      // kept, and an error waits for an explicit retry.
+      if (staleRef.current.has(path)) return true;
       const state = patchesRef.current.get(path);
-      // A loaded patch is kept; an error waits for an explicit retry.
       return state === undefined || state.status === "idle";
     });
     if (toFetch.length === 0) return;
@@ -182,6 +227,7 @@ export function useDiffPatches(
 
   const retry = useCallback(
     (path: string) => {
+      staleRef.current.delete(path);
       setPatches((previous) => {
         const next = new Map(previous);
         next.delete(path);
@@ -194,6 +240,9 @@ export function useDiffPatches(
 
   const prunePaths = useCallback((paths: readonly string[]) => {
     const keep = new Set(paths);
+    for (const path of [...staleRef.current]) {
+      if (!keep.has(path)) staleRef.current.delete(path);
+    }
     setPatches((previous) => {
       let changed = false;
       const next = new Map(previous);
@@ -207,7 +256,18 @@ export function useDiffPatches(
     });
   }, []);
 
-  const invalidate = useCallback(() => setFreshness((value) => value + 1), []);
+  /**
+   * The working tree changed. Everything already read may describe it as it
+   * was, but nothing is dropped: each stale path is re-read in the background
+   * while its current patch stays on screen.
+   */
+  const invalidate = useCallback(() => {
+    for (const [path, state] of patchesRef.current) {
+      if (state.status === "loaded") staleRef.current.add(path);
+    }
+    if (timerRef.current !== null) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(dispatchPending, REQUEST_DEBOUNCE_MS);
+  }, [dispatchPending]);
 
   const getPatchState = useCallback((path: string) => patches.get(path) ?? IDLE, [patches]);
 

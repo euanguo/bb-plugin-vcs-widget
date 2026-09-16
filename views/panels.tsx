@@ -2,9 +2,10 @@
 // and "Show Diff with Working Tree". Both are read-only and render bb's own
 // diff viewer for the selected file.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { experimental_Diff as Diff, useRpc } from "@get-bb/plugin-sdk/app";
+import { useRpc } from "@get-bb/plugin-sdk/app";
 import type { Commit, CompareResult, FileChange, PatchResult, WorkingTreeDiff } from "../contracts";
 import { useRepositoryChanges } from "../hooks/use-repository-changes";
+import { PluginDiff } from "./PluginDiff";
 import { useOverview } from "../hooks/use-overview";
 import { useSidebarThread } from "../hooks/use-sidebar-thread";
 import { errorMessage } from "../lib/errors";
@@ -108,7 +109,7 @@ function PatchView({ patch }: { patch: PatchResult | null | "loading" }) {
   return (
     <div className="min-h-0 flex-1 overflow-auto" data-testid="vcs-patch">
       {patch.truncated ? <p className="px-3 py-1 text-xs text-muted-foreground">Diff truncated at 1 MiB.</p> : null}
-      <Diff patch={patch.patch} path={patch.path} view="unified" overflow="scroll" />
+      <PluginDiff patch={patch.patch} path={patch.path} />
     </div>
   );
 }

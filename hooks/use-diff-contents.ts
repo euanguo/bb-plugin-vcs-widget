@@ -26,6 +26,16 @@ export type DiffContentsState =
 
 const IDLE: DiffContentsState = { status: "idle" };
 
+/** Whether two reads describe the same text, so a re-read can be skipped. */
+function sameContents(a: DiffFullContents, b: DiffFullContents): boolean {
+  return (
+    a.old.path === b.old.path &&
+    a.old.content === b.old.content &&
+    a.new.path === b.new.path &&
+    a.new.content === b.new.content
+  );
+}
+
 /** Requests in flight at once. A stream can have many rows on screen. */
 const MAX_CONCURRENT = 3;
 
@@ -43,13 +53,20 @@ export function useDiffContents(
 ): UseDiffContentsResult {
   const rpc = useRpc<typeof rpcContract>();
   const [states, setStates] = useState<Map<string, DiffContentsState>>(new Map());
-  const [freshness, setFreshness] = useState(0);
-  const identity = `${threadId}:${side}:${freshness}`;
+  // The view these contents describe. Changing it means a different repository
+  // or a different side of it, so nothing stored here is meaningful any more.
+  const identity = `${threadId}:${side}`;
   const identityRef = useRef(identity);
   const statesRef = useRef(states);
   const inFlightRef = useRef<Set<string>>(new Set());
   const queueRef = useRef<{ path: string; oldPath: string | null }[]>([]);
   const controllersRef = useRef<Set<AbortController>>(new Set());
+  // The old path each entry was read with, so a re-read asks the same question.
+  const oldPathsRef = useRef<Map<string, string | null>>(new Map());
+  // Contents that may describe an older working tree. They are re-read in
+  // place, so the context controls on an open card do not disappear and come
+  // back every time the working tree changes.
+  const staleRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     statesRef.current = states;
@@ -61,6 +78,8 @@ export function useDiffContents(
     controllersRef.current.clear();
     inFlightRef.current.clear();
     queueRef.current = [];
+    oldPathsRef.current.clear();
+    staleRef.current.clear();
     setStates(new Map());
   }, [identity]);
 
@@ -79,9 +98,15 @@ export function useDiffContents(
       if (inFlightRef.current.has(next.path)) continue;
       const requestedUnder = identityRef.current;
       inFlightRef.current.add(next.path);
+      oldPathsRef.current.set(next.path, next.oldPath);
       const controller = new AbortController();
       controllersRef.current.add(controller);
-      setStates((previous) => new Map(previous).set(next.path, { status: "loading" }));
+      setStates((previous) => {
+        // A re-read keeps what is already on screen; only a first read has
+        // nothing to show and needs the loading state.
+        if (previous.get(next.path)?.status === "ready") return previous;
+        return new Map(previous).set(next.path, { status: "loading" });
+      });
       void rpc
         .call("diffFile", {
           threadId,
@@ -93,26 +118,42 @@ export function useDiffContents(
           (result) => {
             if (controller.signal.aborted || identityRef.current !== requestedUnder) return;
             setStates((previous) => {
+              const current = previous.get(next.path);
+              const ready =
+                result.ok && result.contents !== null
+                  ? ({ status: "ready", contents: result.contents } as const)
+                  : ({ status: "unavailable" } as const);
+              // Unchanged text keeps the object it already had, so a re-read
+              // that finds nothing new does not re-render the card.
+              if (
+                ready.status === "ready" &&
+                current?.status === "ready" &&
+                sameContents(current.contents, ready.contents)
+              ) {
+                return previous;
+              }
+              // A re-read that came back empty leaves the text already shown.
+              if (ready.status === "unavailable" && current?.status === "ready") return previous;
               const updated = new Map(previous);
               // `contents` is null for a binary, a truncated patch, or a side
               // too large to send; that is the renderer's "unavailable".
-              updated.set(
-                next.path,
-                result.ok && result.contents !== null
-                  ? { status: "ready", contents: result.contents }
-                  : { status: "unavailable" },
-              );
+              updated.set(next.path, ready);
               return updated;
             });
           },
           () => {
             if (controller.signal.aborted || identityRef.current !== requestedUnder) return;
-            setStates((previous) => new Map(previous).set(next.path, { status: "unavailable" }));
+            setStates((previous) =>
+              previous.get(next.path)?.status === "ready"
+                ? previous
+                : new Map(previous).set(next.path, { status: "unavailable" }),
+            );
           },
         )
         .finally(() => {
           controllersRef.current.delete(controller);
           inFlightRef.current.delete(next.path);
+          if (identityRef.current === requestedUnder) staleRef.current.delete(next.path);
           drain();
         });
     }
@@ -123,9 +164,10 @@ export function useDiffContents(
       if (!enabled) return;
       if (inFlightRef.current.has(path)) return;
       const state = statesRef.current.get(path);
-      // Ready stays ready; unavailable waits for an explicit retry (a new
-      // freshness) so one oversized file is not re-read on every scroll.
-      if (state !== undefined && state.status !== "idle") return;
+      // Ready stays ready unless a newer working tree made it stale;
+      // unavailable waits for an explicit retry, so one oversized file is not
+      // re-read on every scroll.
+      if (state !== undefined && state.status !== "idle" && !staleRef.current.has(path)) return;
       queueRef.current.push({ path, oldPath });
       drain();
     },
@@ -135,6 +177,12 @@ export function useDiffContents(
   const prune = useCallback((paths: readonly string[]) => {
     const keep = new Set(paths);
     queueRef.current = queueRef.current.filter((item) => keep.has(item.path));
+    for (const path of [...staleRef.current]) {
+      if (!keep.has(path)) staleRef.current.delete(path);
+    }
+    for (const path of [...oldPathsRef.current.keys()]) {
+      if (!keep.has(path)) oldPathsRef.current.delete(path);
+    }
     setStates((previous) => {
       let changed = false;
       const next = new Map(previous);
@@ -148,7 +196,21 @@ export function useDiffContents(
     });
   }, []);
 
-  const invalidate = useCallback(() => setFreshness((value) => value + 1), []);
+  /**
+   * The working tree changed. Everything already read may describe it as it
+   * was, but nothing is dropped: each stale path is asked for again while the
+   * text it already holds stays on screen.
+   */
+  const invalidate = useCallback(() => {
+    for (const [path, state] of statesRef.current) {
+      if (state.status !== "ready") continue;
+      if (inFlightRef.current.has(path)) continue;
+      if (queueRef.current.some((item) => item.path === path)) continue;
+      staleRef.current.add(path);
+      queueRef.current.push({ path, oldPath: oldPathsRef.current.get(path) ?? null });
+    }
+    drain();
+  }, [drain]);
 
   const getContents = useCallback((path: string) => states.get(path) ?? IDLE, [states]);
 

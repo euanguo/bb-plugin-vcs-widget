@@ -4,7 +4,7 @@
 // in the row's context menu goes through useVcsActions, so it asks first
 // with the exact command.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { experimental_Diff as Diff, useBbNavigate, useRpc } from "@get-bb/plugin-sdk/app";
+import { useBbNavigate, useRpc } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import type { BranchRef, CommitDetails, FileChange, LogCommit, LogFilter, PatchResult } from "../contracts";
 import { useJobs } from "../hooks/use-jobs";
@@ -21,6 +21,7 @@ import { visibleRange } from "../shared/virtual";
 import { CommitRow, type CommitMenuExtra } from "./CommitRow";
 import { ConfirmStep } from "./ConfirmStep";
 import { NewBranchStep } from "./NewBranchStep";
+import { PluginDiff } from "./PluginDiff";
 import { RepositoryEmptyState } from "./RepositoryEmptyState";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -519,13 +520,7 @@ function PatchView({ patch }: { patch: PatchResult | "loading" | null }) {
   return (
     <div className="min-h-0 flex-1 overflow-auto" data-testid="vcs-patch">
       {patch.truncated ? <p className="px-3 py-1 text-xs text-muted-foreground">Diff truncated at 1 MiB.</p> : null}
-      <Diff
-        patch={patch.patch}
-        path={patch.path}
-        view="unified"
-        overflow="scroll"
-        {...(patch.contents === null ? {} : { experimental_fullFileContents: patch.contents })}
-      />
+      <PluginDiff patch={patch.patch} path={patch.path} contents={patch.contents} />
     </div>
   );
 }

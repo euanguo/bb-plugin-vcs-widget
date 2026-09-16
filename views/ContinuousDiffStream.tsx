@@ -3,31 +3,44 @@
 // into view (see use-diff-patches), so opening a sixty-file worktree reads
 // the few the reader is actually looking at.
 //
-// A row is one file: a header that stays put while its body scrolls past, and
-// a body that is either a diff, a notice (binary, too large, not yet read) or
-// nothing at all while collapsed.
+// A row is one file on one side: a header that stays put while its body
+// scrolls past, and a body that is either a diff, a notice (binary, too large,
+// not yet read) or nothing at all while collapsed. Both sides live in the one
+// stream: a file that is staged and edited again shows its staged change and
+// its unstaged change as consecutive rows, so nothing needs a mode switch to
+// be seen. Staged comes first, which is the order git status reports.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { experimental_Diff as Diff } from "@get-bb/plugin-sdk/app";
 import type { ChangeEntry } from "../contracts";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@/lib/utils";
-import { diffSidesFor } from "../shared/model";
 import type { DiffSide } from "../shared/constants";
 import { DIFF_FILES_INLINE_PATCH_MAX_FILES } from "../shared/diff-tiering";
 import type { DiffPatchState, UseDiffPatchesResult } from "../hooks/use-diff-patches";
 import type { DiffContentsState, UseDiffContentsResult } from "../hooks/use-diff-contents";
 import { previewableImageMime } from "../shared/constants";
+import { patchRows } from "../shared/diff-quote";
+import {
+  estimateDiffBodyHeight,
+  IMAGE_BODY_HEIGHT_PX,
+  NOTICE_BODY_HEIGHT_PX,
+} from "../shared/diff-height";
 import { ImageDiffPreview } from "./ImageDiffPreview";
-import { DiffQuoteSelection } from "./DiffQuoteSelection";
+import { PluginDiff } from "./PluginDiff";
+
+/** One file on one side of the index. */
+export interface DiffStreamEntry {
+  entry: ChangeEntry;
+  side: DiffSide;
+}
 
 interface ContinuousDiffStreamProps {
   threadId: string;
-  files: readonly ChangeEntry[];
-  side: DiffSide;
-  patches: UseDiffPatchesResult;
+  entries: readonly DiffStreamEntry[];
+  /** One reader per side, because a batch read names exactly one side. */
+  patches: Readonly<Record<DiffSide, UseDiffPatchesResult>>;
   /** Complete old/new text per path, for "expand unchanged lines". */
-  contents: UseDiffContentsResult;
+  contents: Readonly<Record<DiffSide, UseDiffContentsResult>>;
   /** Bumped whenever `changes` arrives, so stale patches are re-read. */
   filesUpdatedAt: unknown;
   isPanelOpen: boolean;
@@ -38,11 +51,41 @@ interface ContinuousDiffStreamProps {
   className?: string;
 }
 
+const SIDES: readonly DiffSide[] = ["index", "worktree"];
+
+/**
+ * How far past the viewport a card is still mounted. A mounted card is the
+ * expensive one — the renderer builds a shadow-DOM tree of every changed line —
+ * so the stream mounts the cards near the reader and replaces the rest with a
+ * spacer of the height they measured last time they were on screen.
+ *
+ * The margin is deliberately generous. Unmounting and remounting a card costs
+ * a re-parse, and the host's highlighter cache only makes that cheap, not free,
+ * so a card the reader scrolls back over should still be there.
+ */
+const MOUNT_ROOT_MARGIN = "800px 0px";
+
+/** A row is one file on one side; the same path can hold two rows. */
+function rowKey(item: DiffStreamEntry): string {
+  return `${item.entry.path}:${item.side}`;
+}
+
+/** The same key, read back off a row element by the observers. */
+function elementKey(element: HTMLElement): string | null {
+  const path = element.dataset.path;
+  const side = element.dataset.side;
+  if (path === undefined || (side !== "index" && side !== "worktree")) return null;
+  return `${path}:${side}`;
+}
+
+const SIDE_LABEL: Record<DiffSide, string> = {
+  index: "Staged",
+  worktree: "Unstaged",
+};
 
 export function ContinuousDiffStream({
   threadId,
-  files,
-  side,
+  entries,
   patches,
   contents,
   filesUpdatedAt,
@@ -55,46 +98,46 @@ export function ContinuousDiffStream({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const [collapsed, setCollapsed] = useState<Map<string, boolean>>(new Map());
+  // The rows whose diff renderer is mounted. `null` means "mount everything",
+  // which is what an environment without IntersectionObserver gets: better a
+  // heavy stream than an empty one.
+  const [mounted, setMounted] = useState<ReadonlySet<string> | null>(null);
 
-  const isCollapsed = useCallback(
-    (entry: ChangeEntry) => collapsed.get(entry.path) ?? false,
-    [collapsed],
-  );
+  const isCollapsed = useCallback((key: string) => collapsed.get(key) ?? false, [collapsed]);
 
-  const toggleCollapsed = useCallback(
-    (entry: ChangeEntry) => {
-      setCollapsed((previous) => {
-        const next = new Map(previous);
-        next.set(entry.path, !(previous.get(entry.path) ?? false));
-        return next;
-      });
-    },
-    [files.length],
-  );
+  const toggleCollapsed = useCallback((key: string) => {
+    setCollapsed((previous) => {
+      const next = new Map(previous);
+      next.set(key, !(previous.get(key) ?? false));
+      return next;
+    });
+  }, []);
 
-  const allCollapsed = files.length > 0 && files.every((entry) => isCollapsed(entry));
+  const allCollapsed = entries.length > 0 && entries.every((item) => isCollapsed(rowKey(item)));
   const toggleAll = useCallback(() => {
     const target = !allCollapsed;
-    setCollapsed(new Map(files.map((entry) => [entry.path, target])));
-  }, [allCollapsed, files]);
+    setCollapsed(new Map(entries.map((item) => [rowKey(item), target])));
+  }, [allCollapsed, entries]);
 
-  // Forget patches for files that left the list, and re-read the ones that
-  // are still here after the working tree changed.
-  const { prunePaths, invalidate } = patches;
+  // The distinct files, for the prune calls and the summary line.
+  const paths = useMemo(() => [...new Set(entries.map((item) => item.entry.path))], [entries]);
+
+  // Forget patches for files that left the list, and re-read the ones that are
+  // still here after the working tree changed. Both sides move together: the
+  // reader that has nothing to fetch does nothing.
   useEffect(() => {
-    prunePaths(files.map((entry) => entry.path));
-  }, [files, prunePaths]);
+    for (const side of SIDES) patches[side].prunePaths(paths);
+  }, [paths, patches]);
   useEffect(() => {
-    invalidate();
-  }, [filesUpdatedAt, invalidate]);
+    for (const side of SIDES) patches[side].invalidate();
+  }, [filesUpdatedAt, patches]);
   // The full-text cache follows the same lifecycle as the patch cache.
-  const { prune: pruneContents, invalidate: invalidateContents } = contents;
   useEffect(() => {
-    pruneContents(files.map((entry) => entry.path));
-  }, [files, pruneContents]);
+    for (const side of SIDES) contents[side].prune(paths);
+  }, [paths, contents]);
   useEffect(() => {
-    invalidateContents();
-  }, [filesUpdatedAt, invalidateContents]);
+    for (const side of SIDES) contents[side].invalidate();
+  }, [filesUpdatedAt, contents]);
 
   // Only what is on screen (plus a little either side) is asked for. Where
   // the environment has no IntersectionObserver (jsdom, an old webview) the
@@ -104,37 +147,82 @@ export function ContinuousDiffStream({
     if (!isPanelOpen) return;
     const container = scrollRef.current;
     if (container === null) return;
+    const ask = (visible: Record<DiffSide, string[]>, overscan: Record<DiffSide, string[]>) => {
+      for (const side of SIDES) patches[side].requestPaths({ visible: visible[side], overscan: overscan[side] });
+    };
     if (typeof IntersectionObserver === "undefined") {
-      patches.requestPaths({ visible: files.slice(0, DIFF_FILES_INLINE_PATCH_MAX_FILES).map((entry) => entry.path), overscan: [] });
+      const first = entries.slice(0, DIFF_FILES_INLINE_PATCH_MAX_FILES);
+      ask(
+        { index: first.filter((item) => item.side === "index").map((item) => item.entry.path), worktree: first.filter((item) => item.side === "worktree").map((item) => item.entry.path) },
+        { index: [], worktree: [] },
+      );
       return;
     }
     const observer = new IntersectionObserver(
       (observed) => {
-        const visible: string[] = [];
-        const overscan: string[] = [];
+        const visible: Record<DiffSide, string[]> = { index: [], worktree: [] };
+        const overscan: Record<DiffSide, string[]> = { index: [], worktree: [] };
         for (const record of observed) {
-          const path = (record.target as HTMLElement).dataset.path;
-          if (path === undefined) continue;
-          (record.isIntersecting ? visible : overscan).push(path);
+          const element = record.target as HTMLElement;
+          const path = element.dataset.path;
+          const side = element.dataset.side;
+          if (path === undefined || (side !== "index" && side !== "worktree")) continue;
+          (record.isIntersecting ? visible : overscan)[side].push(path);
         }
         // Anything already loaded stays loaded; the hook filters.
-        patches.requestPaths({ visible, overscan });
+        ask(visible, overscan);
       },
       { root: container, rootMargin: "200px 0px" },
     );
     for (const element of rowRefs.current.values()) observer.observe(element);
     return () => observer.disconnect();
-  }, [files, isPanelOpen, patches]);
+  }, [entries, isPanelOpen, patches]);
+
+  // The mount window. Separate from the reader above because it answers a
+  // different question — "is this card close enough to keep rendered?" — with a
+  // much wider margin than "is this file worth reading yet?".
+  useEffect(() => {
+    if (!isPanelOpen) return;
+    const container = scrollRef.current;
+    if (container === null) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setMounted(null);
+      return;
+    }
+    const keys = new Set(entries.map(rowKey));
+    const observer = new IntersectionObserver(
+      (observed) => {
+        setMounted((previous) => {
+          // A file that left the list takes its row with it.
+          const next = new Set<string>();
+          for (const key of previous ?? []) if (keys.has(key)) next.add(key);
+          for (const record of observed) {
+            const key = elementKey(record.target as HTMLElement);
+            if (key === null) continue;
+            if (record.isIntersecting) next.add(key);
+            else next.delete(key);
+          }
+          return next;
+        });
+      },
+      { root: container, rootMargin: MOUNT_ROOT_MARGIN },
+    );
+    for (const element of rowRefs.current.values()) observer.observe(element);
+    return () => observer.disconnect();
+  }, [entries, isPanelOpen]);
 
   useEffect(() => {
     if (scrollToPath === null) return;
-    const element = rowRefs.current.get(scrollToPath);
+    // A file with two rows scrolls to its first one.
+    const first = entries.find((item) => item.entry.path === scrollToPath);
+    if (first === undefined) return;
+    const element = rowRefs.current.get(rowKey(first));
     if (element === undefined) return;
     element.scrollIntoView({ block: "start" });
     onScrolledToPath();
-  }, [scrollToPath, onScrolledToPath]);
+  }, [scrollToPath, entries, onScrolledToPath]);
 
-  if (files.length === 0) {
+  if (entries.length === 0) {
     return (
       <div className={cn("flex min-h-0 flex-1 items-center justify-center p-6", className)}>
         <p className="text-sm text-muted-foreground">Nothing to commit: the working tree is clean.</p>
@@ -146,7 +234,7 @@ export function ContinuousDiffStream({
     <div className={cn("flex min-h-0 flex-1 flex-col", className)}>
       <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
         <span className="min-w-0 truncate text-xs text-muted-foreground" data-testid="vcs-stream-summary">
-          {files.length} file{files.length === 1 ? "" : "s"}
+          {paths.length} file{paths.length === 1 ? "" : "s"}
         </span>
         <Button
           type="button"
@@ -162,26 +250,30 @@ export function ContinuousDiffStream({
       </div>
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto" data-testid="vcs-stream">
         <div className="flex min-w-0 flex-col">
-          {files.map((entry) => (
-            <DiffStreamRow
-              key={entry.path}
-              threadId={threadId}
-              entry={entry}
-              side={side}
-              patchState={patches.getPatchState(entry.path)}
-              contentsState={contents.getContents(entry.path)}
-              onRequestContents={() => contents.requestContents(entry.path, entry.oldPath)}
-              isCollapsed={isCollapsed(entry)}
-              onToggleCollapsed={() => toggleCollapsed(entry)}
-              onLoadPatch={() => patches.loadPath(entry.path)}
-              onRetry={() => patches.retry(entry.path)}
-              onOpenFile={onOpenFile}
-              registerRef={(element) => {
-                if (element === null) rowRefs.current.delete(entry.path);
-                else rowRefs.current.set(entry.path, element);
-              }}
-            />
-          ))}
+          {entries.map((item) => {
+            const key = rowKey(item);
+            return (
+              <DiffStreamRow
+                key={key}
+                threadId={threadId}
+                entry={item.entry}
+                side={item.side}
+                patchState={patches[item.side].getPatchState(item.entry.path)}
+                contentsState={contents[item.side].getContents(item.entry.path)}
+                onRequestContents={() => contents[item.side].requestContents(item.entry.path, item.entry.oldPath)}
+                isCollapsed={isCollapsed(key)}
+                isMounted={mounted === null || mounted.has(key)}
+                onToggleCollapsed={() => toggleCollapsed(key)}
+                onLoadPatch={() => patches[item.side].loadPath(item.entry.path)}
+                onRetry={() => patches[item.side].retry(item.entry.path)}
+                onOpenFile={onOpenFile}
+                registerRef={(element) => {
+                  if (element === null) rowRefs.current.delete(key);
+                  else rowRefs.current.set(key, element);
+                }}
+              />
+            );
+          })}
         </div>
       </div>
     </div>
@@ -196,11 +288,26 @@ interface DiffStreamRowProps {
   contentsState: DiffContentsState;
   onRequestContents: () => void;
   isCollapsed: boolean;
+  /** Whether this row's diff renderer is close enough to the viewport to mount. */
+  isMounted: boolean;
   onToggleCollapsed: () => void;
   onLoadPatch: () => void;
   onRetry: () => void;
   onOpenFile?: (path: string) => void;
   registerRef: (element: HTMLDivElement | null) => void;
+}
+
+/** The first guess at a row's body height, for a card never yet measured. */
+function estimateBodyHeight(entry: ChangeEntry, patchState: DiffPatchState): number {
+  if (patchState.status === "loaded" && patchState.binary === true) {
+    const mimeType = previewableImageMime(entry.path) ?? previewableImageMime(entry.oldPath);
+    return mimeType === null ? NOTICE_BODY_HEIGHT_PX : IMAGE_BODY_HEIGHT_PX;
+  }
+  if (patchState.status === "loaded" && patchState.patch !== undefined && patchState.patch.trim() !== "") {
+    const rows = patchRows(patchState.patch).length;
+    if (rows > 0) return estimateDiffBodyHeight(rows);
+  }
+  return NOTICE_BODY_HEIGHT_PX;
 }
 
 const STATUS_LETTER: Record<string, string> = {
@@ -239,6 +346,7 @@ function DiffStreamRow({
   contentsState,
   onRequestContents,
   isCollapsed,
+  isMounted,
   onToggleCollapsed,
   onLoadPatch,
   onRetry,
@@ -248,11 +356,36 @@ function DiffStreamRow({
   const label = entry.oldPath === null || entry.oldPath === entry.path ? entry.path : `${entry.oldPath} -> ${entry.path}`;
   const letter = statusLetter(entry);
 
+  // The height this row's body measured the last time it was mounted, so the
+  // spacer that replaces it holds the same space. `estimatedBodyHeight` is only
+  // the first guess, for a card that has never been on screen.
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const measuredHeightRef = useRef<number | null>(null);
+  const estimatedBodyHeight = useMemo(() => estimateBodyHeight(entry, patchState), [entry, patchState]);
+
+  // Measure only while the body is mounted. The observer is torn down when the
+  // row leaves the window, so the spacer cannot overwrite the number that
+  // decided how tall the spacer should be.
+  useEffect(() => {
+    const element = bodyRef.current;
+    if (!isMounted || isCollapsed || element === null) return;
+    if (typeof ResizeObserver === "undefined") {
+      measuredHeightRef.current = element.getBoundingClientRect().height;
+      return;
+    }
+    const observer = new ResizeObserver((observed) => {
+      for (const record of observed) measuredHeightRef.current = record.contentRect.height;
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [isMounted, isCollapsed]);
+
   return (
     <section
       ref={registerRef}
       data-path={entry.path}
-      data-testid={`vcs-stream-row-${entry.path}`}
+      data-side={side}
+      data-testid={`vcs-stream-row-${entry.path}-${side}`}
       className="min-w-0 border-b border-border"
     >
       <header className="flex min-w-0 items-center gap-2 border-b border-border px-3 py-2">
@@ -273,6 +406,9 @@ function DiffStreamRow({
         <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground" title={label}>
           {label}
         </span>
+        <span className="shrink-0 rounded-sm bg-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground" data-testid={`vcs-stream-side-tag-${entry.path}-${side}`}>
+          {SIDE_LABEL[side]}
+        </span>
         {patchState.status === "loaded" && patchState.truncated ? (
           <span className="shrink-0 text-xs text-muted-foreground">truncated</span>
         ) : null}
@@ -289,17 +425,26 @@ function DiffStreamRow({
         ) : null}
       </header>
       {isCollapsed ? null : (
-        <DiffStreamBody
-          threadId={threadId}
-          entry={entry}
-          side={side}
-          patchState={patchState}
-          contentsState={contentsState}
-          onRequestContents={onRequestContents}
-          onLoadPatch={onLoadPatch}
-          onRetry={onRetry}
-          onOpenFile={onOpenFile}
-        />
+        <div ref={bodyRef}>
+          {isMounted ? (
+            <DiffStreamBody
+              threadId={threadId}
+              entry={entry}
+              side={side}
+              patchState={patchState}
+              contentsState={contentsState}
+              onRequestContents={onRequestContents}
+              onLoadPatch={onLoadPatch}
+              onRetry={onRetry}
+              onOpenFile={onOpenFile}
+            />
+          ) : (
+            <div
+              style={{ height: measuredHeightRef.current ?? estimatedBodyHeight }}
+              data-testid={`vcs-stream-spacer-${entry.path}-${side}`}
+            />
+          )}
+        </div>
       )}
     </section>
   );
@@ -328,6 +473,17 @@ function DiffStreamBody({
   onRetry: () => void;
   onOpenFile?: (path: string) => void;
 }) {
+  // A patch with hunks can offer "expand unchanged lines" only once the
+  // renderer also has both complete sides; ask for them as soon as the card
+  // can use them (bb's own panel does the same, on idle). A binary card has
+  // already returned below, so only truncation still rules the request out.
+  const canExpandContext = patchState.status === "loaded" && patchState.truncated !== true;
+  useEffect(() => {
+    if (!canExpandContext) return;
+    if (contentsState.status !== "idle") return;
+    onRequestContents();
+  }, [canExpandContext, contentsState.status, onRequestContents]);
+
   if (patchState.status === "error") {
     return (
       <div className={NOTICE_CLASS}>
@@ -341,7 +497,7 @@ function DiffStreamBody({
 
   if (patchState.status === "idle" || patchState.status === "loading") {
     return (
-      <div className={NOTICE_CLASS} data-testid={`vcs-stream-loading-${entry.path}`}>
+      <div className={NOTICE_CLASS} data-testid={`vcs-stream-loading-${entry.path}-${side}`}>
         <span>{patchState.status === "loading" ? "Reading diff…" : "Not loaded yet."}</span>
         {patchState.status === "idle" ? (
           <Button type="button" variant="link" size="sm" className="h-auto p-0 text-xs underline underline-offset-4" onClick={onLoadPatch}>
@@ -368,7 +524,7 @@ function DiffStreamBody({
       );
     }
     return (
-      <div className={NOTICE_CLASS} data-testid={`vcs-stream-binary-${entry.path}`}>
+      <div className={NOTICE_CLASS} data-testid={`vcs-stream-binary-${entry.path}-${side}`}>
         <span>Binary file.</span>
         {onOpenFile !== undefined ? (
           <Button type="button" variant="link" size="sm" className="h-auto p-0 text-xs underline underline-offset-4" onClick={() => onOpenFile(entry.path)}>
@@ -387,30 +543,13 @@ function DiffStreamBody({
     );
   }
 
-  // A patch with hunks can offer "expand unchanged lines" only once the
-  // renderer also has both complete sides; ask for them as soon as the card
-  // can use them (bb's own panel does the same, on idle). A binary card has
-  // already returned above, so only truncation still rules the request out.
-  const canExpandContext =
-    patchState.status === "loaded" && patchState.truncated !== true;
-  useEffect(() => {
-    if (!canExpandContext) return;
-    if (contentsState.status !== "idle") return;
-    onRequestContents();
-  }, [canExpandContext, contentsState.status, onRequestContents]);
   return (
-    <DiffQuoteSelection path={entry.path}>
-      <div className="min-w-0 overflow-x-auto" data-testid={`vcs-stream-patch-${entry.path}`} data-side={side}>
-        <Diff
-          patch={patchState.patch}
-          path={entry.path}
-          view="unified"
-          overflow="scroll"
-          {...(contentsState.status === "ready"
-            ? { experimental_fullFileContents: contentsState.contents }
-            : {})}
-        />
-      </div>
-    </DiffQuoteSelection>
+    <div className="min-w-0 overflow-x-auto" data-testid={`vcs-stream-patch-${entry.path}-${side}`} data-side={side}>
+      <PluginDiff
+        patch={patchState.patch}
+        path={entry.path}
+        contents={contentsState.status === "ready" ? contentsState.contents : null}
+      />
+    </div>
   );
 }

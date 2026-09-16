@@ -883,7 +883,7 @@ describe("CommitPanel", () => {
     const user = userEvent.setup();
     const slot = renderCommitPanel();
     await groupByStatus(user, slot);
-    await slot.findByText("staged.txt");
+    await slot.findAllByText("staged.txt");
     expect(slot.getByText("Changes")).toBeTruthy();
     expect(slot.getByText("Unversioned files")).toBeTruthy();
     expect(slot.getByTestId("vcs-commit-counts").textContent).toBe("2 staged · 2 unstaged");
@@ -925,23 +925,108 @@ describe("CommitPanel", () => {
     expect(slot.getByLabelText("Unstage edited.txt")).toBeTruthy();
   });
 
-  it("previews the staged side of a selected file and lets the other side be picked", async () => {
+  it("reads both sides on its own, and shows a file that has both as two rows", async () => {
+    const slot = renderCommitPanel();
+    // Neither side waits to be picked: a batch read names exactly one side, so
+    // the panel keeps one reader per side and both run.
+    await waitFor(() => expect(batchCalls(slot).some((call) => call.side === "worktree")).toBe(true));
+    await waitFor(() => expect(batchCalls(slot).some((call) => call.side === "index")).toBe(true));
+    expect(batchCalls(slot).find((call) => call.side === "worktree")?.paths).toContain("both.txt");
+    expect(batchCalls(slot).find((call) => call.side === "index")?.paths).toContain("both.txt");
+    // both.txt is staged and edited again, so it holds a row on each side, and
+    // the staged change is the one that comes first.
+    const rows = await slot.findAllByTestId(/^vcs-stream-row-both\.txt-/u);
+    expect(rows.map((row) => row.getAttribute("data-side"))).toEqual(["index", "worktree"]);
+    expect(slot.getByTestId("vcs-stream-side-tag-both.txt-index").textContent).toBe("Staged");
+    expect(slot.getByTestId("vcs-stream-side-tag-both.txt-worktree").textContent).toBe("Unstaged");
+    // The mode switch is gone: there is nothing to pick.
+    expect(slot.queryByTestId("vcs-stream-side-index")).toBeNull();
+  });
+
+  it("quotes a diff line into the composer from the gutter button", async () => {
     const user = userEvent.setup();
     const slot = renderCommitPanel();
-    // The stream reads one side for every file at once, and the side switch
-    // sits above it: picking "Staged" re-reads the whole visible set.
-    await waitFor(() => expect(batchCalls(slot).length).toBeGreaterThan(0));
-    expect(batchCalls(slot).at(-1)).toMatchObject({ threadId: "t1", side: "worktree" });
-    expect(batchCalls(slot).at(-1)?.paths).toContain("both.txt");
-    await user.click(slot.getByTestId("vcs-stream-side-index"));
-    await waitFor(() => expect(batchCalls(slot).at(-1)).toMatchObject({ threadId: "t1", side: "index" }));
-    expect(batchCalls(slot).at(-1)?.paths).toContain("both.txt");
+    const row = await slot.findByTestId("vcs-stream-patch-both.txt-worktree");
+    // The diffFiles mock answers "@@ -1 +1 @@\n-a\n+b\n", so line 1 of the new
+    // side is "+b"; the quote is the patch fragment an agent reads. The same
+    // file also has a staged row, hence the scoped lookup.
+    await user.click(within(row).getByTestId("vcs-diff-gutter-both.txt"));
+    expect(slot.inspection.composer.quotes).toEqual(["both.txt\n@@ -0,0 +1 @@\n+b"]);
+  });
+
+  it("keeps the diffs on screen when a tick makes the panel re-read the tree", async () => {
+    const user = userEvent.setup();
+    const slot = renderCommitPanel();
+    // Wait until a patch is actually rendered.
+    await slot.findByTestId("vcs-stream-patch-both.txt-worktree");
+    await user.click(await slot.findByLabelText("Stage new.txt"));
+    await waitFor(() => expect(calls(slot, "stage")).toHaveLength(1));
+    // The optimistic tick replaces the panel's own view of the tree. That used
+    // to drop every cached patch, so one tick flashed the whole column back to
+    // "Reading diff…" and re-read files nothing had touched. A patch already on
+    // screen now stays until its background re-read lands.
+    expect(slot.queryByTestId("vcs-stream-loading-both.txt-worktree")).toBeNull();
+    expect(slot.getByTestId("vcs-stream-patch-both.txt-worktree")).toBeTruthy();
+  });
+
+  it("mounts only the cards near the viewport, and holds a far row's space with a spacer", async () => {
+    // jsdom has no IntersectionObserver, so the stream mounts every row. This
+    // stands in for a browser: the test says which rows are near the viewport.
+    class IntersectionObserverStub {
+      static readonly instances: IntersectionObserverStub[] = [];
+      readonly elements = new Set<Element>();
+      constructor(
+        private readonly callback: IntersectionObserverCallback,
+        readonly options?: IntersectionObserverInit,
+      ) {
+        IntersectionObserverStub.instances.push(this);
+      }
+      observe(element: Element) { this.elements.add(element); }
+      unobserve(element: Element) { this.elements.delete(element); }
+      disconnect() { this.elements.clear(); }
+      takeRecords() { return []; }
+      /** Report the targets `near` accepts as close by and the rest as far away. */
+      report(near: (element: HTMLElement) => boolean) {
+        const entries = [...this.elements].map((target) => {
+          const intersecting = near(target as HTMLElement);
+          return { target, isIntersecting: intersecting, intersectionRatio: intersecting ? 1 : 0 };
+        }) as IntersectionObserverEntry[];
+        act(() => this.callback(entries, this as unknown as IntersectionObserver));
+      }
+    }
+    Object.assign(globalThis, { IntersectionObserver: IntersectionObserverStub });
+    try {
+      const slot = renderCommitPanel();
+      await slot.findAllByTestId(/^vcs-stream-row-/u);
+      // The stream keeps one reader per concern, so the newest observer with
+      // each margin is the live one; the reader's is re-made as patches land.
+      const newest = (rootMargin: string) =>
+        [...IntersectionObserverStub.instances]
+          .reverse()
+          .find((instance) => instance.options?.rootMargin === rootMargin);
+      const row = (element: HTMLElement) => ({ path: element.dataset.path, side: element.dataset.side });
+      // Start with everything on screen: both sides of both.txt read and render.
+      newest("200px 0px")!.report(() => true);
+      newest("800px 0px")!.report(() => true);
+      await slot.findByTestId("vcs-stream-patch-both.txt-index");
+      await slot.findByTestId("vcs-stream-patch-both.txt-worktree");
+      // Now the reader scrolls until only one card is left nearby.
+      newest("800px 0px")!.report((element) => row(element).path === "both.txt" && row(element).side === "worktree");
+      // The card that scrolled away keeps its place: a spacer the height of its
+      // two changed lines, and no renderer behind it. The mounted card stays.
+      const spacer = await slot.findByTestId("vcs-stream-spacer-both.txt-index");
+      expect(spacer.style.height).toBe("44px");
+      expect(slot.queryByTestId("vcs-stream-patch-both.txt-index")).toBeNull();
+      expect(slot.getByTestId("vcs-stream-patch-both.txt-worktree")).toBeTruthy();
+    } finally {
+      delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
+    }
   });
 
   it("commits the index with the message as a job and clears the message when it finishes", async () => {
     const user = userEvent.setup();
     const slot = renderCommitPanel();
-    await slot.findByText("staged.txt");
+    await slot.findAllByText("staged.txt");
     const button = slot.getByTestId("vcs-commit-button") as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     await user.type(slot.getByTestId("vcs-commit-message"), "Ship it");
@@ -969,7 +1054,7 @@ describe("CommitPanel", () => {
   it("amend prefills the last message and asks first with the exact command", async () => {
     const user = userEvent.setup();
     const slot = renderCommitPanel();
-    await slot.findByText("staged.txt");
+    await slot.findAllByText("staged.txt");
     await user.click(slot.getByLabelText("Amend"));
     expect((slot.getByTestId("vcs-commit-message") as HTMLTextAreaElement).value).toBe("Last one\n\nBody");
     await user.click(slot.getByLabelText("Sign-off"));
@@ -1012,7 +1097,7 @@ describe("CommitPanel", () => {
       value: { writeText: (text: string) => { copied.push(text); return Promise.resolve(); } },
     });
     const slot = renderCommitPanel();
-    await slot.findByText("staged.txt");
+    await slot.findAllByText("staged.txt");
     const menu = await openFileMenu(slot, "staged.txt");
     expect(Array.from(menu.querySelectorAll("[role=menuitem]")).map((item) => item.textContent)).toEqual(["Copy Path", "Discard"]);
     await user.click(within(menu).getByText("Copy Path"));
@@ -1031,7 +1116,7 @@ describe("CommitPanel", () => {
     const conflicted = { path: "clash.txt", oldPath: null, index: "U", worktree: "U", kind: "conflicted" as const };
     const slot = renderCommitPanel({ changes: { ...CHANGES, files: [...CHANGES.files, conflicted] } });
     await groupByStatus(user, slot);
-    await slot.findByText("staged.txt");
+    await slot.findAllByText("staged.txt");
     expect(slot.queryByLabelText("Discard all changes in Conflicts")).toBeNull();
     await user.click(slot.getByLabelText("Discard all changes in Changes"));
     expect(await screen.findByText("Discard changes in 3 files")).toBeTruthy();
@@ -1066,7 +1151,7 @@ describe("CommitPanel", () => {
   it("hands the commit to the thread's agent whatever is staged", async () => {
     const user = userEvent.setup();
     const slot = renderCommitPanel({ rpc: { sendToAgent: () => ({ ok: true, delivery: "queued" }) } });
-    await slot.findByText("staged.txt");
+    await slot.findAllByText("staged.txt");
     const button = slot.getByTestId("vcs-agent-commit-button") as HTMLButtonElement;
     // The label names the actor, because "Commit" is taken by the button beside it.
     expect(button.textContent).toBe("Agent Commit");
@@ -1081,7 +1166,7 @@ describe("CommitPanel", () => {
   it("asks the agent to push too, without ever naming the text it sends", async () => {
     const user = userEvent.setup();
     const slot = renderCommitPanel({ rpc: { sendToAgent: () => ({ ok: true, delivery: "sent" }) } });
-    await slot.findByText("staged.txt");
+    await slot.findAllByText("staged.txt");
     const button = slot.getByTestId("vcs-agent-commit-push-button") as HTMLButtonElement;
     expect(button.textContent).toBe("Agent Commit & Push");
     // Enabled with no upstream, unlike the panel's own push: the agent is the
@@ -1098,7 +1183,7 @@ describe("CommitPanel", () => {
     const slot = renderCommitPanel({
       rpc: { sendToAgent: () => ({ ok: false, error: { code: "git_failed", message: "The message did not reach the agent: no such thread" } }) },
     });
-    await slot.findByText("staged.txt");
+    await slot.findAllByText("staged.txt");
     await user.click(slot.getByTestId("vcs-agent-commit-button"));
     expect((await slot.findByTestId("vcs-commit-notice")).textContent).toContain("did not reach the agent");
   });
@@ -1106,7 +1191,7 @@ describe("CommitPanel", () => {
   it("Commit and Push follows the commit with the push dialog on the overview the commit reported", async () => {
     const user = userEvent.setup();
     const slot = renderCommitPanel();
-    await slot.findByText("staged.txt");
+    await slot.findAllByText("staged.txt");
     await user.type(slot.getByTestId("vcs-commit-message"), "Ship and push");
     await user.click(slot.getByTestId("vcs-commit-push-button"));
     await waitFor(() => expect(calls(slot, "commit")).toHaveLength(1));

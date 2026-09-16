@@ -4,7 +4,7 @@
 // mutation goes through useVcsActions, so discards and amends ask first with
 // the exact command and the commit runs as a job on the host.
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { experimental_Diff as Diff, useRpc } from "@get-bb/plugin-sdk/app";
+import { useRpc } from "@get-bb/plugin-sdk/app";
 import type { ChangeEntry, FileDiff } from "../contracts";
 import { useChanges } from "../hooks/use-changes";
 import { useDiffPatches } from "../hooks/use-diff-patches";
@@ -284,16 +284,26 @@ export function CommitPanel({ threadId }: PanelProps) {
   }, [files, grouping, heaviestFirst]);
   const collapsedTreePathSet = useMemo(() => new Set(collapsedTreePaths), [collapsedTreePaths]);
   const stagedCount = files.filter(isStaged).length;
-  // The stream reads one side at a time, which is what lets a batch read stay
-  // one host call per page. Unstaged first: reviewing what is not yet in the
-  // index is the common case.
-  const [streamSide, setStreamSide] = useState<DiffSide>("worktree");
-  const streamFiles = useMemo(
-    () => files.filter((candidate) => diffSidesFor(candidate).includes(streamSide)),
-    [files, streamSide],
+  // Both sides go into the one stream, staged first: a file that is staged and
+  // then edited again shows both of its changes, and nothing needs a mode
+  // switch to be seen. A batch read names exactly one side, so each side keeps
+  // its own reader and a page stays one host call.
+  const streamEntries = useMemo(
+    () => files.flatMap((entry) => diffSidesFor(entry).map((side) => ({ entry, side }))),
+    [files],
   );
-  const patches = useDiffPatches(threadId, streamSide, true);
-  const contents = useDiffContents(threadId, streamSide, true);
+  const indexPatches = useDiffPatches(threadId, "index", true);
+  const worktreePatches = useDiffPatches(threadId, "worktree", true);
+  const patches = useMemo(
+    () => ({ index: indexPatches, worktree: worktreePatches }),
+    [indexPatches, worktreePatches],
+  );
+  const indexContents = useDiffContents(threadId, "index", true);
+  const worktreeContents = useDiffContents(threadId, "worktree", true);
+  const contents = useMemo(
+    () => ({ index: indexContents, worktree: worktreeContents }),
+    [indexContents, worktreeContents],
+  );
 
   const blocked = commitBlockedReason(overview, changes);
   const busy = actions.busy;
@@ -478,36 +488,14 @@ export function CommitPanel({ threadId }: PanelProps) {
       <div ref={splitRef} className="flex min-h-0 flex-1">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col border-r border-border">
           <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
-            <span className="shrink-0 text-xs text-muted-foreground">Diff</span>
-            <div role="group" aria-label="Diff side" className="flex gap-1">
-              <Button
-                type="button"
-                size="sm"
-                className="h-6 px-2 text-xs"
-                variant={streamSide === "worktree" ? "secondary" : "ghost"}
-                onClick={() => setStreamSide("worktree")}
-                aria-pressed={streamSide === "worktree"}
-                data-testid="vcs-stream-side-worktree"
-              >
-                Unstaged
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                className="h-6 px-2 text-xs"
-                variant={streamSide === "index" ? "secondary" : "ghost"}
-                onClick={() => setStreamSide("index")}
-                aria-pressed={streamSide === "index"}
-                data-testid="vcs-stream-side-index"
-              >
-                Staged
-              </Button>
-            </div>
+            <span className="shrink-0 text-xs text-muted-foreground">
+              Diff
+              <span className="ml-1 text-muted-foreground/70">staged and unstaged together</span>
+            </span>
           </div>
           <ContinuousDiffStream
             threadId={threadId}
-            files={streamFiles}
-            side={streamSide}
+            entries={streamEntries}
             patches={patches}
             contents={contents}
             filesUpdatedAt={changesUpdatedAt}

@@ -9,6 +9,9 @@ export default defineConfig({
       // Vitest runs outside that host, so it exercises the identical vendored
       // icon implementation instead.
       "@bb/shared-ui/icon": fileURLToPath(new URL("./test/icon-shim.tsx", import.meta.url)),
+      // Same story for the diff renderer: the real one needs a shadow root
+      // and a worker pool. Parsing (@pierre/diffs) stays real.
+      "@pierre/diffs/react": fileURLToPath(new URL("./test/pierre-react-shim.tsx", import.meta.url)),
     },
   },
   test: {

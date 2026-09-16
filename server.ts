@@ -15,6 +15,7 @@ import {
   type JobRealtimePayload,
   type JobStart,
   type Overview,
+  type RepositoryUnavailable,
 } from "./contracts";
 import { MAX_BRANCH_NAME_LENGTH, isValidRemoteName } from "./shared/branch-name";
 import {
@@ -154,15 +155,19 @@ export default async function plugin(bb: BbPluginApi) {
     return { code: "not_a_repo", message, hint: hintFor("not_a_repo", "preflight") ?? "" };
   }
 
-  function unavailableResult(message: string): ActionResult {
-    return { ok: false, error: unavailableError(message), overview: unavailableOverview(message) };
+  function unavailableResult(unavailable: RepositoryUnavailable): ActionResult {
+    return {
+      ok: false,
+      error: unavailableError(unavailable.message),
+      overview: unavailableOverview(unavailable.message, unavailable.kind),
+    };
   }
 
-  async function resolveTarget(threadId: string): Promise<RepositoryTarget | { unavailable: string }> {
+  async function resolveTarget(threadId: string): Promise<RepositoryTarget | { unavailable: RepositoryUnavailable }> {
     try {
       return await repositoryForThread(bb, threadId);
     } catch (error) {
-      if (error instanceof RepositoryUnavailableError) return { unavailable: error.message };
+      if (error instanceof RepositoryUnavailableError) return { unavailable: error.unavailable };
       throw error;
     }
   }
@@ -219,7 +224,13 @@ export default async function plugin(bb: BbPluginApi) {
     run: (target: RepositoryTarget, timeoutMs: number) => Promise<JobStart>,
   ): Promise<JobStart> {
     const target = await resolveTarget(threadId);
-    if ("unavailable" in target) return { ok: false, error: unavailableError(target.unavailable), overview: unavailableOverview(target.unavailable) };
+    if ("unavailable" in target) {
+      return {
+        ok: false,
+        error: unavailableError(target.unavailable.message),
+        overview: unavailableOverview(target.unavailable.message, target.unavailable.kind),
+      };
+    }
     logMutation(reason, threadId, target);
     const defaults = await effectiveSettings();
     let start: JobStart;
@@ -245,7 +256,7 @@ export default async function plugin(bb: BbPluginApi) {
     failure: (error: GitError) => T,
   ): Promise<T> {
     const target = await resolveTarget(threadId);
-    if ("unavailable" in target) return failure(unavailableError(target.unavailable));
+    if ("unavailable" in target) return failure(unavailableError(target.unavailable.message));
     try {
       return await run(target);
     } catch (error) {
@@ -256,7 +267,7 @@ export default async function plugin(bb: BbPluginApi) {
   /** `fav:<hostId>:<repoRoot>`; host ids carry no colon, worktree paths may. */
   const favouriteKey = (hostId: string, repoRoot: string) => `${FAVOURITE_PREFIX}${hostId}:${repoRoot}`;
 
-  async function favouritesKey(threadId: string): Promise<{ key: string } | { unavailable: string }> {
+  async function favouritesKey(threadId: string): Promise<{ key: string } | { unavailable: RepositoryUnavailable }> {
     const target = await resolveTarget(threadId);
     if ("unavailable" in target) return target;
     const known = repoByEnvironment.get(target.environmentId);
@@ -287,7 +298,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.rpc.register(rpcContract, {
     async overview({ threadId }) {
       const target = await resolveTarget(threadId);
-      if ("unavailable" in target) return unavailableOverview(target.unavailable);
+      if ("unavailable" in target) return unavailableOverview(target.unavailable.message, target.unavailable.kind);
       const overview = await host.call(
         "overview",
         { repoPath: target.repoPath, recentLimit: RECENT_LIMIT },
@@ -572,7 +583,7 @@ export default async function plugin(bb: BbPluginApi) {
   const cliReader: CliReader = {
     async overview(threadId) {
       const target = await resolveTarget(threadId);
-      if ("unavailable" in target) return unavailableOverview(target.unavailable);
+      if ("unavailable" in target) return unavailableOverview(target.unavailable.message, target.unavailable.kind);
       const result = await host.call(
         "overview",
         { repoPath: target.repoPath, recentLimit: RECENT_LIMIT },

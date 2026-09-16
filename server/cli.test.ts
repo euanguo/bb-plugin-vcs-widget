@@ -18,6 +18,7 @@ function overview(extra: Partial<Overview> = {}): Overview {
   return {
     ...unavailableOverview(""),
     unavailableReason: null,
+    unavailableKind: null,
     repoRoot: "/repo",
     repoName: "repo",
     gitVersion: "2.55.0",

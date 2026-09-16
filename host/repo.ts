@@ -239,6 +239,7 @@ export async function readOverview(
 
   return {
     unavailableReason: null,
+    unavailableKind: null,
     repoRoot: repo.repoRoot,
     repoName: basename(repo.repoRoot),
     gitVersion: version,

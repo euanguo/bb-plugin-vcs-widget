@@ -8,6 +8,8 @@ import { experimental_Diff as Diff, useRpc } from "@get-bb/plugin-sdk/app";
 import type { ChangeEntry, FileDiff } from "../contracts";
 import { useChanges } from "../hooks/use-changes";
 import { useDiffPatches } from "../hooks/use-diff-patches";
+import { useDiffContents } from "../hooks/use-diff-contents";
+import { usePersistedState } from "../hooks/use-persisted-state";
 import { useJobs } from "../hooks/use-jobs";
 import { useOverview } from "../hooks/use-overview";
 import { useSidebarThread } from "../hooks/use-sidebar-thread";
@@ -27,7 +29,9 @@ import {
 } from "../shared/model";
 import { groupChanges, isGroupingMode, sortGroupsByWeight, type GroupingMode } from "../shared/grouping";
 import { ConfirmStep } from "./ConfirmStep";
+import { ChangeTree } from "./ChangeTree";
 import { ContinuousDiffStream } from "./ContinuousDiffStream";
+import { RepositoryEmptyState } from "./RepositoryEmptyState";
 import {
   Select,
   SelectContent,
@@ -232,38 +236,53 @@ export function CommitPanel({ threadId }: PanelProps) {
   const actions = useVcsActions({ threadId, overview, applyOverview, onCheckedOut: () => undefined, waitForJob: jobs.waitFor, quiet: true, applyStaged });
 
   const [selected, setSelected] = useState<string | null>(null);
+  // A file-list click scrolls the stream to that file rather than swapping
+  // what the pane shows; the request is cleared once it has been honoured.
+  const [scrollToPath, setScrollToPath] = useState<string | null>(null);
   // Which paths have a stage/unstage in flight. The list disables only those
   // rows, not every row: a global `busy` turned the whole list half-opaque
   // for the length of one round trip, which is the flicker this fixes.
   const [pendingPaths, setPendingPaths] = useState<ReadonlySet<string>>(() => new Set());
-  // A file-list click scrolls the stream to that file rather than swapping
-  // what the pane shows; the request is cleared once it has been honoured.
-  const [scrollToPath, setScrollToPath] = useState<string | null>(null);
+  const [isResizing, setIsResizing] = useState(false);
   const [message, setMessage] = useState("");
   const [amend, setAmend] = useState(false);
-  // What the two things that are not git actions report: the copied path and
-  // the message handed to the agent. The action status line below is
-  // `actions.status`, and neither of these produces one.
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const [sending, setSending] = useState(false);
   const [signoff, setSignoff] = useState(false);
   const [runHooks, setRunHooks] = useState(true);
-  // The message Amend filled in, so turning it off can clear it again.
+  const [grouping, setGrouping] = usePersistedState<GroupingMode>(`vcs-widget.grouping.${threadId}`, "directory");
+  const [heaviestFirst, setHeaviestFirst] = usePersistedState(`vcs-widget.grouping-heavy.${threadId}`, false);
+  const [collapsedTreePaths, setCollapsedTreePaths] = usePersistedState<string[]>(`vcs-widget.tree-collapsed.${threadId}`, []);
+  const [rightPaneWidth, setRightPaneWidth] = usePersistedState(`vcs-widget.right-pane-width.${threadId}`, 320);
+  const splitRef = useRef<HTMLDivElement | null>(null);
   const prefilled = useRef<string | null>(null);
-
-  // Every successful `changes` read is a new object, so its identity is what
-  // tells the stream that a cached patch may now describe an older tree.
   const changesUpdatedAt = changes;
 
+  const handleToggleTreePath = useCallback((path: string) => {
+    setCollapsedTreePaths((current) => current.includes(path) ? current.filter((value) => value !== path) : [...current, path]);
+  }, [setCollapsedTreePaths]);
+  useEffect(() => {
+    if (!isResizing) return;
+    const handleMove = (event: PointerEvent) => {
+      const bounds = splitRef.current?.getBoundingClientRect();
+      if (bounds === undefined) return;
+      const next = Math.min(520, Math.max(220, bounds.right - event.clientX));
+      setRightPaneWidth(next);
+    };
+    const handleUp = () => setIsResizing(false);
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp, { once: true });
+    return () => {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+    };
+  }, [isResizing, setRightPaneWidth]);
   const files = useMemo(() => (changes?.ok ? changes.files : []), [changes]);
-  // How the file list is grouped. Directory answers the flat-list problem:
-  // sixty files in one column say nothing about where the work is.
-  const [grouping, setGrouping] = useState<GroupingMode>("status");
-  const [heaviestFirst, setHeaviestFirst] = useState(false);
   const groups = useMemo(() => {
     const grouped = groupChanges(files, grouping);
     return heaviestFirst ? sortGroupsByWeight(grouped) : grouped;
   }, [files, grouping, heaviestFirst]);
+  const collapsedTreePathSet = useMemo(() => new Set(collapsedTreePaths), [collapsedTreePaths]);
   const stagedCount = files.filter(isStaged).length;
   // The stream reads one side at a time, which is what lets a batch read stay
   // one host call per page. Unstaged first: reviewing what is not yet in the
@@ -274,6 +293,7 @@ export function CommitPanel({ threadId }: PanelProps) {
     [files, streamSide],
   );
   const patches = useDiffPatches(threadId, streamSide, true);
+  const contents = useDiffContents(threadId, streamSide, true);
 
   const blocked = commitBlockedReason(overview, changes);
   const busy = actions.busy;
@@ -424,6 +444,20 @@ export function CommitPanel({ threadId }: PanelProps) {
   const status = actions.status;
   const progress = jobs.progress;
 
+  // No repository: the diff pane and the file list would each only have an
+  // error to show, so the panel shows one empty state instead of both.
+  if (overview !== null && overview.unavailableReason !== null) {
+    return (
+      <div className="flex h-full min-h-0 flex-col text-sm" data-testid="vcs-commit-panel">
+        <RepositoryEmptyState
+          kind={overview.unavailableKind}
+          reason={overview.unavailableReason ?? ""}
+          onRetry={refetch}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col text-sm" data-testid="vcs-commit-panel">
       <header className="flex items-center gap-2 border-b border-border px-3 py-2">
@@ -441,7 +475,7 @@ export function CommitPanel({ threadId }: PanelProps) {
       </header>
 
       {/* Left: every changed file's diff, stacked. Right: the file list. */}
-      <div className="flex min-h-0 flex-1">
+      <div ref={splitRef} className="flex min-h-0 flex-1">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col border-r border-border">
           <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
             <span className="shrink-0 text-xs text-muted-foreground">Diff</span>
@@ -475,6 +509,7 @@ export function CommitPanel({ threadId }: PanelProps) {
             files={streamFiles}
             side={streamSide}
             patches={patches}
+            contents={contents}
             filesUpdatedAt={changesUpdatedAt}
             isPanelOpen
             scrollToPath={scrollToPath}
@@ -483,8 +518,19 @@ export function CommitPanel({ threadId }: PanelProps) {
           />
         </div>
 
+        <button
+          type="button"
+          className={cn("w-1 shrink-0 cursor-col-resize border-0 bg-transparent p-0 hover:bg-ring/40", isResizing && "bg-ring/60")}
+          aria-label="Resize changed files panel"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            setIsResizing(true);
+          }}
+          data-testid="vcs-file-list-resizer"
+        />
         <div
-          className="flex min-h-0 w-72 shrink-0 flex-col overflow-y-auto"
+          className="flex min-h-0 min-w-0 shrink-0 flex-col overflow-x-hidden overflow-y-auto"
+          style={{ width: rightPaneWidth }}
           aria-label="Changed files"
           data-testid="vcs-file-list"
         >
@@ -526,7 +572,24 @@ export function CommitPanel({ threadId }: PanelProps) {
                   <Icon name="ArrowUpDown" className="size-3.5" />
                 </Button>
               </div>
-              {groups.map((group) => (
+              {grouping === "directory" ? (
+                <ChangeTree
+                  entries={files}
+                  selected={selected}
+                  collapsedPaths={collapsedTreePathSet}
+                  disabled={disabled}
+                  pendingPaths={pendingPaths}
+                  onToggleDirectory={handleToggleTreePath}
+                  onToggleAll={toggleAll}
+                  onToggleFile={toggle}
+                  onSelectFile={(next) => {
+                    setSelected(next.path);
+                    setScrollToPath(next.path);
+                  }}
+                  onDiscardFile={discardOne}
+                  onMenu={onFileMenu}
+                />
+              ) : groups.map((group) => (
                 <Group
                   key={group.key}
                   title={group.title}

@@ -1,4 +1,5 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import type { RepositoryUnavailable, UnavailableKind } from "../contracts";
 
 export interface RepositoryTarget {
   environmentId: string;
@@ -6,11 +7,18 @@ export interface RepositoryTarget {
   repoPath: string;
 }
 
-/** Expected states in which a thread has no usable repository; never a crash. */
+/**
+ * Expected states in which a thread has no usable repository; never a crash.
+ * Carries the kind so the panels can render one shared empty state without
+ * parsing the message.
+ */
 export class RepositoryUnavailableError extends Error {
-  constructor(message: string) {
+  readonly unavailable: RepositoryUnavailable;
+
+  constructor(kind: UnavailableKind, message: string) {
     super(message);
     this.name = "RepositoryUnavailableError";
+    this.unavailable = { kind, message };
   }
 }
 
@@ -24,17 +32,17 @@ export async function repositoryForThread(
 ): Promise<RepositoryTarget> {
   const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
   if (!("environment" in thread) || !thread.environment) {
-    throw new RepositoryUnavailableError("This thread has no project environment.");
+    throw new RepositoryUnavailableError("no_environment", "This thread has no project environment.");
   }
   const environment = thread.environment;
   if (!environment.path) {
-    throw new RepositoryUnavailableError("The thread environment has no workspace path yet.");
+    throw new RepositoryUnavailableError("no_workspace", "The thread environment has no workspace path yet.");
   }
   if (environment.status !== "ready") {
-    throw new RepositoryUnavailableError(`The thread environment is ${environment.status}.`);
+    throw new RepositoryUnavailableError("provisioning", `The thread environment is ${environment.status}.`);
   }
   if (environment.isGitRepo === false) {
-    throw new RepositoryUnavailableError("The thread workspace is not a git repository.");
+    throw new RepositoryUnavailableError("not_a_repo", "The thread workspace is not a git repository.");
   }
   return {
     environmentId: environment.id,

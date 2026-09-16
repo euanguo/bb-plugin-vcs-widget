@@ -8,6 +8,9 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  // The panel persists view preferences (grouping, tree folding, split width)
+  // per thread; without this they leak from one test into the next.
+  window.localStorage.clear();
 });
 
 /**
@@ -78,6 +81,7 @@ function overview(extra: Partial<Overview> = {}): Overview {
   return {
     ...unavailableOverview(""),
     unavailableReason: null,
+    unavailableKind: null,
     repoRoot: "/repo",
     repoName: "repo",
     gitVersion: "2.55.0",
@@ -729,6 +733,7 @@ describe("panels", () => {
       {
         sidebarThreads: sidebarThread({ id: "env1", branchName: "main" }),
         rpc: {
+          overview: () => overview(),
           compare: () => ({ ok: true, base: "main", target: "feature", aheadCount: 1, behindCount: 0, ahead: [{ sha: "a".repeat(40), shortSha: "aaaaaaa", author: "Costa", committedAt: 1, subject: "feature work" }], behind: [], files: [{ path: "a.txt", oldPath: null, additions: 1, deletions: 0, binary: false }], truncated: { ahead: false, behind: false, files: false } }),
           comparePatch: (input: { path: string }) => ({ ok: true, path: input.path, patch: "@@ -1 +1 @@\n-a\n+b\n", truncated: false, binary: false, contents: null }),
         } as never,
@@ -738,9 +743,82 @@ describe("panels", () => {
     expect(slot.getByTestId("vcs-compare-counts").textContent).toBe("feature +1 · main +0");
     await user.click(slot.getByText("a.txt"));
     await slot.findByTestId("vcs-patch");
-    expect(slot.inspection.rpcCalls.map((call) => call.method)).toEqual(["compare", "comparePatch"]);
-    const bad = renderSlot<PluginThreadPanelProps, typeof rpcContract>(compare, { threadId: "t1", params: { base: 1 } }, {});
+    // The panel reads the overview first: it is what tells a panel with no
+    // repository to show the shared empty state instead of an empty frame.
+    expect(slot.inspection.rpcCalls.map((call) => call.method)).toEqual(["overview", "compare", "comparePatch"]);
+    const bad = renderSlot<PluginThreadPanelProps, typeof rpcContract>(
+      compare,
+      { threadId: "t1", params: { base: 1 } },
+      { rpc: { overview: () => overview() } as never },
+    );
     expect(bad.getByText(/Open this tab from a branch/u)).toBeTruthy();
+  });
+
+  it("replaces a panel's layout with one shared empty state when there is no repository", async () => {
+    const commit = app.threadPanelActions.find((action) => action.id === "commit")!;
+    const notRepo: Overview = {
+      ...overview(),
+      unavailableReason: "The thread workspace is not a git repository.",
+      unavailableKind: "not_a_repo",
+      repoRoot: null,
+      repoName: null,
+      head: null,
+      local: [],
+      remote: [],
+    };
+    const renderCommit = (view: Overview) =>
+      renderSlot<PluginThreadPanelProps, typeof rpcContract>(
+        commit,
+        { threadId: "t1", params: {} },
+        {
+          sidebarThreads: sidebarThread({ id: "env1", branchName: "main" }),
+          rpc: {
+            overview: () => view,
+            changes: () => ({
+              ok: false as const,
+              error: { code: "not_a_repo" as const, message: "The thread workspace is not a git repository.", hint: "" },
+            }),
+          } as never,
+        },
+      );
+
+    const slot = renderCommit(notRepo);
+    const empty = await slot.findByTestId("vcs-repository-empty");
+    expect(empty.getAttribute("data-kind")).toBe("not_a_repo");
+    expect(slot.getByText("Not a Git repository")).toBeTruthy();
+    // The server's own sentence survives, and the panel's normal chrome does
+    // not: neither the diff stream nor the changed-files list is mounted.
+    expect(slot.getByText("The thread workspace is not a git repository.")).toBeTruthy();
+    expect(slot.queryByTestId("vcs-stream")).toBeNull();
+    expect(slot.queryByTestId("vcs-file-list")).toBeNull();
+
+  });
+
+  it("lets the unavailability kind, not the sentence, choose the empty state's heading", async () => {
+    const commit = app.threadPanelActions.find((action) => action.id === "commit")!;
+    const slot = renderSlot<PluginThreadPanelProps, typeof rpcContract>(
+      commit,
+      { threadId: "t1", params: {} },
+      {
+        sidebarThreads: sidebarThread({ id: "env1", branchName: "main" }),
+        rpc: {
+          overview: () => ({
+            ...overview(),
+            unavailableReason: "The thread environment is provisioning.",
+            unavailableKind: "provisioning" as const,
+            repoRoot: null,
+            repoName: null,
+          }),
+          changes: () => ({
+            ok: false as const,
+            error: { code: "not_a_repo" as const, message: "The thread environment is provisioning.", hint: "" },
+          }),
+        } as never,
+      },
+    );
+    expect((await slot.findByTestId("vcs-repository-empty")).getAttribute("data-kind")).toBe("provisioning");
+    expect(slot.getByText("The environment is still starting")).toBeTruthy();
+    expect(slot.queryByText("Not a Git repository")).toBeNull();
   });
 });
 
@@ -783,9 +861,28 @@ describe("CommitPanel", () => {
   /** The batch reads, typed: `calls` returns `unknown` inputs by design. */
   const batchCalls = (slot: { inspection: { rpcCalls: { method: string; input: unknown }[] } }) =>
     calls(slot, "diffFiles") as { threadId: string; paths: string[]; side: "index" | "worktree" }[];
+  /**
+   * The panel opens on the directory tree. Tests that assert the status
+   * buckets (their headers carry the stage-all and discard-all controls) pick
+   * that grouping explicitly.
+   */
+  const groupByStatus = async (
+    user: ReturnType<typeof userEvent.setup>,
+    slot: {
+      getByTestId: (id: string) => HTMLElement;
+      findByTestId: (id: string) => Promise<HTMLElement>;
+      findByRole: (role: string, options: { name: string }) => Promise<HTMLElement>;
+    },
+  ) => {
+    // The selector only exists once the first `changes` read has landed.
+    await user.click(await slot.findByTestId("vcs-grouping-mode"));
+    await user.click(await slot.findByRole("option", { name: "By status" }));
+  };
 
   it("lists the working tree in groups with the checkbox as the staged state", async () => {
+    const user = userEvent.setup();
     const slot = renderCommitPanel();
+    await groupByStatus(user, slot);
     await slot.findByText("staged.txt");
     expect(slot.getByText("Changes")).toBeTruthy();
     expect(slot.getByText("Unversioned files")).toBeTruthy();
@@ -800,6 +897,7 @@ describe("CommitPanel", () => {
   it("stages and unstages through the checkboxes, whole groups through the header", async () => {
     const user = userEvent.setup();
     const slot = renderCommitPanel();
+    await groupByStatus(user, slot);
     await user.click(await slot.findByLabelText("Stage edited.txt"));
     await waitFor(() => expect(calls(slot, "stage")).toEqual([{ threadId: "t1", paths: ["edited.txt"] }]));
     await user.click(slot.getByLabelText("Unstage staged.txt"));
@@ -932,6 +1030,7 @@ describe("CommitPanel", () => {
     const user = userEvent.setup();
     const conflicted = { path: "clash.txt", oldPath: null, index: "U", worktree: "U", kind: "conflicted" as const };
     const slot = renderCommitPanel({ changes: { ...CHANGES, files: [...CHANGES.files, conflicted] } });
+    await groupByStatus(user, slot);
     await slot.findByText("staged.txt");
     expect(slot.queryByLabelText("Discard all changes in Conflicts")).toBeNull();
     await user.click(slot.getByLabelText("Discard all changes in Changes"));
@@ -955,6 +1054,7 @@ describe("CommitPanel", () => {
       kind: "tracked" as const,
     }));
     const slot = renderCommitPanel({ changes: { ...CHANGES, files } });
+    await groupByStatus(user, slot);
     await slot.findByLabelText("Discard all changes in Changes");
     await user.click(slot.getByLabelText("Discard all changes in Changes"));
     expect(await slot.findByText("Too many files for one discard.")).toBeTruthy();

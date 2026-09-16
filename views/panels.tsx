@@ -5,12 +5,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { experimental_Diff as Diff, useRpc } from "@get-bb/plugin-sdk/app";
 import type { Commit, CompareResult, FileChange, PatchResult, WorkingTreeDiff } from "../contracts";
 import { useRepositoryChanges } from "../hooks/use-repository-changes";
+import { useOverview } from "../hooks/use-overview";
+import { useSidebarThread } from "../hooks/use-sidebar-thread";
 import { errorMessage } from "../lib/errors";
 import type { rpcContract } from "../server";
 import { refLabel } from "../shared/model";
 import { parseCompareParams, parseDiffParams } from "../shared/panel-params";
 import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@/lib/utils";
+import { RepositoryEmptyState } from "./RepositoryEmptyState";
 
 interface PanelProps {
   threadId: string;
@@ -123,6 +126,8 @@ function Frame({ header, top, patch }: { header: React.ReactNode; top: React.Rea
 
 export function ComparePanel({ threadId, params }: PanelProps) {
   const rpc = useRpc<typeof rpcContract>();
+  const sidebar = useSidebarThread(threadId);
+  const { overview, refetch: refetchOverview } = useOverview({ threadId, environmentId: sidebar.environmentId, enabled: true });
   const parsed = parseCompareParams(params);
   const [result, setResult] = useState<CompareResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -172,6 +177,23 @@ export function ComparePanel({ threadId, params }: PanelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refs are plain data
   }, [rpc, threadId, selected, result, JSON.stringify(parsed)]);
 
+  // No repository: comparing branches has nothing to compare, so the panel
+  // states the situation once instead of framing an empty list above a red
+  // error sentence.
+  if (overview !== null && overview.unavailableReason !== null) {
+    return (
+      <div className="flex h-full min-h-0 flex-col text-sm" data-testid="vcs-compare-panel">
+        <RepositoryEmptyState
+          kind={overview.unavailableKind}
+          reason={overview.unavailableReason}
+          onRetry={() => {
+            void refetchOverview();
+            refetch();
+          }}
+        />
+      </div>
+    );
+  }
   if (parsed === null) {
     return <Empty>Open this tab from a branch's context menu: Compare with the current branch.</Empty>;
   }
@@ -219,6 +241,8 @@ export function ComparePanel({ threadId, params }: PanelProps) {
 
 export function DiffPanel({ threadId, params }: PanelProps) {
   const rpc = useRpc<typeof rpcContract>();
+  const sidebar = useSidebarThread(threadId);
+  const { overview, refetch: refetchOverview } = useOverview({ threadId, environmentId: sidebar.environmentId, enabled: true });
   const parsed = parseDiffParams(params);
   const [result, setResult] = useState<WorkingTreeDiff | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -268,6 +292,23 @@ export function DiffPanel({ threadId, params }: PanelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refs are plain data
   }, [rpc, threadId, selected, result, JSON.stringify(parsed)]);
 
+  // No repository: the working tree cannot differ from anything, so the panel
+  // states the situation once instead of framing an empty list above a red
+  // error sentence.
+  if (overview !== null && overview.unavailableReason !== null) {
+    return (
+      <div className="flex h-full min-h-0 flex-col text-sm" data-testid="vcs-diff-panel">
+        <RepositoryEmptyState
+          kind={overview.unavailableKind}
+          reason={overview.unavailableReason}
+          onRetry={() => {
+            void refetchOverview();
+            refetch();
+          }}
+        />
+      </div>
+    );
+  }
   if (parsed === null) {
     return <Empty>Open this tab from a branch's context menu: Show Diff with Working Tree.</Empty>;
   }

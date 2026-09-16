@@ -14,8 +14,9 @@ import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@/lib/utils";
 import { diffSidesFor } from "../shared/model";
 import type { DiffSide } from "../shared/constants";
-import { resolveDiffCollapsed, DIFF_FILES_INLINE_PATCH_MAX_FILES } from "../shared/diff-tiering";
+import { DIFF_FILES_INLINE_PATCH_MAX_FILES } from "../shared/diff-tiering";
 import type { DiffPatchState, UseDiffPatchesResult } from "../hooks/use-diff-patches";
+import type { DiffContentsState, UseDiffContentsResult } from "../hooks/use-diff-contents";
 import { previewableImageMime } from "../shared/constants";
 import { ImageDiffPreview } from "./ImageDiffPreview";
 import { DiffQuoteSelection } from "./DiffQuoteSelection";
@@ -25,6 +26,8 @@ interface ContinuousDiffStreamProps {
   files: readonly ChangeEntry[];
   side: DiffSide;
   patches: UseDiffPatchesResult;
+  /** Complete old/new text per path, for "expand unchanged lines". */
+  contents: UseDiffContentsResult;
   /** Bumped whenever `changes` arrives, so stale patches are re-read. */
   filesUpdatedAt: unknown;
   isPanelOpen: boolean;
@@ -36,17 +39,12 @@ interface ContinuousDiffStreamProps {
 }
 
 
-/** A status entry is "deleted" when either side says so; otherwise it is a change. */
-function initialCollapsed(entry: ChangeEntry, fileCount: number): boolean {
-  const deleted = entry.worktree === "D" || entry.index === "D";
-  return resolveDiffCollapsed({ fileCount, changeKind: deleted ? "deleted" : "modified" });
-}
-
 export function ContinuousDiffStream({
   threadId,
   files,
   side,
   patches,
+  contents,
   filesUpdatedAt,
   isPanelOpen,
   scrollToPath,
@@ -59,15 +57,15 @@ export function ContinuousDiffStream({
   const [collapsed, setCollapsed] = useState<Map<string, boolean>>(new Map());
 
   const isCollapsed = useCallback(
-    (entry: ChangeEntry) => collapsed.get(entry.path) ?? initialCollapsed(entry, files.length),
-    [collapsed, files.length],
+    (entry: ChangeEntry) => collapsed.get(entry.path) ?? false,
+    [collapsed],
   );
 
   const toggleCollapsed = useCallback(
     (entry: ChangeEntry) => {
       setCollapsed((previous) => {
         const next = new Map(previous);
-        next.set(entry.path, !(previous.get(entry.path) ?? initialCollapsed(entry, files.length)));
+        next.set(entry.path, !(previous.get(entry.path) ?? false));
         return next;
       });
     },
@@ -89,6 +87,14 @@ export function ContinuousDiffStream({
   useEffect(() => {
     invalidate();
   }, [filesUpdatedAt, invalidate]);
+  // The full-text cache follows the same lifecycle as the patch cache.
+  const { prune: pruneContents, invalidate: invalidateContents } = contents;
+  useEffect(() => {
+    pruneContents(files.map((entry) => entry.path));
+  }, [files, pruneContents]);
+  useEffect(() => {
+    invalidateContents();
+  }, [filesUpdatedAt, invalidateContents]);
 
   // Only what is on screen (plus a little either side) is asked for. Where
   // the environment has no IntersectionObserver (jsdom, an old webview) the
@@ -154,8 +160,8 @@ export function ContinuousDiffStream({
           {allCollapsed ? "Expand all" : "Collapse all"}
         </Button>
       </div>
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-3 pb-3" data-testid="vcs-stream">
-        <div className="flex flex-col gap-2 pt-3">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto" data-testid="vcs-stream">
+        <div className="flex min-w-0 flex-col">
           {files.map((entry) => (
             <DiffStreamRow
               key={entry.path}
@@ -163,6 +169,8 @@ export function ContinuousDiffStream({
               entry={entry}
               side={side}
               patchState={patches.getPatchState(entry.path)}
+              contentsState={contents.getContents(entry.path)}
+              onRequestContents={() => contents.requestContents(entry.path, entry.oldPath)}
               isCollapsed={isCollapsed(entry)}
               onToggleCollapsed={() => toggleCollapsed(entry)}
               onLoadPatch={() => patches.loadPath(entry.path)}
@@ -185,6 +193,8 @@ interface DiffStreamRowProps {
   entry: ChangeEntry;
   side: DiffSide;
   patchState: DiffPatchState;
+  contentsState: DiffContentsState;
+  onRequestContents: () => void;
   isCollapsed: boolean;
   onToggleCollapsed: () => void;
   onLoadPatch: () => void;
@@ -226,6 +236,8 @@ function DiffStreamRow({
   entry,
   side,
   patchState,
+  contentsState,
+  onRequestContents,
   isCollapsed,
   onToggleCollapsed,
   onLoadPatch,
@@ -241,9 +253,9 @@ function DiffStreamRow({
       ref={registerRef}
       data-path={entry.path}
       data-testid={`vcs-stream-row-${entry.path}`}
-      className="overflow-clip rounded-lg border border-border bg-background"
+      className="min-w-0 border-b border-border"
     >
-      <header className="flex items-center gap-2 border-b border-border px-3 py-2">
+      <header className="flex min-w-0 items-center gap-2 border-b border-border px-3 py-2">
         <Button
           type="button"
           variant="ghost"
@@ -282,6 +294,8 @@ function DiffStreamRow({
           entry={entry}
           side={side}
           patchState={patchState}
+          contentsState={contentsState}
+          onRequestContents={onRequestContents}
           onLoadPatch={onLoadPatch}
           onRetry={onRetry}
           onOpenFile={onOpenFile}
@@ -298,6 +312,8 @@ function DiffStreamBody({
   entry,
   side,
   patchState,
+  contentsState,
+  onRequestContents,
   onLoadPatch,
   onRetry,
   onOpenFile,
@@ -306,6 +322,8 @@ function DiffStreamBody({
   entry: ChangeEntry;
   side: DiffSide;
   patchState: DiffPatchState;
+  contentsState: DiffContentsState;
+  onRequestContents: () => void;
   onLoadPatch: () => void;
   onRetry: () => void;
   onOpenFile?: (path: string) => void;
@@ -369,10 +387,29 @@ function DiffStreamBody({
     );
   }
 
+  // A patch with hunks can offer "expand unchanged lines" only once the
+  // renderer also has both complete sides; ask for them as soon as the card
+  // can use them (bb's own panel does the same, on idle). A binary card has
+  // already returned above, so only truncation still rules the request out.
+  const canExpandContext =
+    patchState.status === "loaded" && patchState.truncated !== true;
+  useEffect(() => {
+    if (!canExpandContext) return;
+    if (contentsState.status !== "idle") return;
+    onRequestContents();
+  }, [canExpandContext, contentsState.status, onRequestContents]);
   return (
     <DiffQuoteSelection path={entry.path}>
-      <div className="overflow-x-auto" data-testid={`vcs-stream-patch-${entry.path}`} data-side={side}>
-        <Diff patch={patchState.patch} path={entry.path} view="unified" overflow="scroll" />
+      <div className="min-w-0 overflow-x-auto" data-testid={`vcs-stream-patch-${entry.path}`} data-side={side}>
+        <Diff
+          patch={patchState.patch}
+          path={entry.path}
+          view="unified"
+          overflow="scroll"
+          {...(contentsState.status === "ready"
+            ? { experimental_fullFileContents: contentsState.contents }
+            : {})}
+        />
       </div>
     </DiffQuoteSelection>
   );

@@ -132,10 +132,28 @@ export const jobSummarySchema = z
   })
   .strict();
 
+/**
+ * Why a thread has no usable repository. This is the machine-readable
+ * companion to `unavailableReason`: every panel renders the same empty state,
+ * and it must say whether the workspace is not a git repository at all rather
+ * than match on an English sentence.
+ */
+export const UNAVAILABLE_KINDS = ["no_environment", "no_workspace", "provisioning", "not_a_repo", "unreadable"] as const;
+export const unavailableKindSchema = z.enum(UNAVAILABLE_KINDS);
+export type UnavailableKind = z.infer<typeof unavailableKindSchema>;
+
+/** An unavailability as the server resolved it: a kind and the sentence to show. */
+export interface RepositoryUnavailable {
+  kind: UnavailableKind;
+  message: string;
+}
+
 export const overviewSchema = z
   .object({
     /** Set when the thread has no usable git worktree; lists are then empty. */
     unavailableReason: z.string().nullable(),
+    /** Machine-readable companion to `unavailableReason`; null when usable. */
+    unavailableKind: unavailableKindSchema.nullable(),
     repoRoot: z.string().nullable(),
     repoName: z.string().nullable(),
     gitVersion: z.string().nullable(),
@@ -1050,9 +1068,10 @@ export interface JobRealtimePayload {
 }
 
 /** An overview for a thread without a usable repository. */
-export function unavailableOverview(reason: string): Overview {
+export function unavailableOverview(reason: string, kind: UnavailableKind = "not_a_repo"): Overview {
   return {
     unavailableReason: reason,
+    unavailableKind: kind,
     repoRoot: null,
     repoName: null,
     gitVersion: null,

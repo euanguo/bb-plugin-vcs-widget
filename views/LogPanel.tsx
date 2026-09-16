@@ -21,6 +21,7 @@ import { visibleRange } from "../shared/virtual";
 import { CommitRow, type CommitMenuExtra } from "./CommitRow";
 import { ConfirmStep } from "./ConfirmStep";
 import { NewBranchStep } from "./NewBranchStep";
+import { RepositoryEmptyState } from "./RepositoryEmptyState";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Icon } from "@bb/shared-ui/icon";
@@ -273,6 +274,20 @@ export function LogPanel({ threadId, params }: PanelProps) {
 
   const status = actions.status;
   const filterId = `vcs-log-filter-${threadId}`;
+
+  // No repository: there is no history to filter, so the log shows the shared
+  // empty state rather than an empty list with an error over it.
+  if (overview !== null && overview.unavailableReason !== null) {
+    return (
+      <div className="flex h-full min-h-0 flex-col text-sm" data-testid="vcs-log-panel">
+        <RepositoryEmptyState
+          kind={overview.unavailableKind}
+          reason={overview.unavailableReason ?? ""}
+          onRetry={log.refetch}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col text-sm" data-testid="vcs-log-panel">

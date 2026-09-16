@@ -172,7 +172,12 @@ export default experimental_defineHostEntry({
     async overview({ repoPath, recentLimit }, context): Promise<Overview> {
       const budget = createBudget();
       const resolved = await resolveRepo(repoPath, { signal: context.signal, timeoutMs: budget.deadlineFor("read") });
-      if ("error" in resolved) return unavailableOverview(resolved.error.message);
+      if ("error" in resolved) {
+        return unavailableOverview(
+          resolved.error.message,
+          resolved.error.code === "not_a_repo" ? "not_a_repo" : "unreadable",
+        );
+      }
       ensureWatch(resolved, context, (repoRoot, reason) => context.experimental_emitSignal("changed", { repoRoot, reason }));
       try {
         return await readOverview(resolved, {
@@ -181,8 +186,13 @@ export default experimental_defineHostEntry({
           timeoutMs: Math.min(DEADLINES_MS.read, budget.remaining()),
         });
       } catch (error) {
-        if (error instanceof OverviewReadError) return unavailableOverview(error.gitError.message);
-        return unavailableOverview(errorMessage(error));
+        if (error instanceof OverviewReadError) {
+          return unavailableOverview(
+            error.gitError.message,
+            error.gitError.code === "not_a_repo" ? "not_a_repo" : "unreadable",
+          );
+        }
+        return unavailableOverview(errorMessage(error), "unreadable");
       }
     },
     checkout({ repoPath, target }, context) {

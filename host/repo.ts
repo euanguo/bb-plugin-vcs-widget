@@ -85,12 +85,18 @@ export async function resolveRepo(
   if (toplevel === "") {
     return { error: pluginGitError("not_a_repo", "The thread workspace is not inside a git worktree.", "read") };
   }
-  // `--git-common-dir` prints a relative path (".git") in a main worktree;
-  // it is relative to the cwd, not the toplevel.
+  // `--absolute-git-dir` is already absolute and symlink-resolved, while
+  // `--git-common-dir` prints a relative `.git` in a main worktree. Resolving
+  // the relative one against the toplevel rather than against the caller's
+  // spelling of the workspace keeps both git dirs in one spelling: resolving
+  // it against an unresolved path (macOS `/var` vs `/private/var`, a symlinked
+  // checkout) made one physical git dir look like two, so the watch registry
+  // registered the same directory twice and two spellings of the same
+  // repository did not share a lock or a job slot.
   return {
     repoRoot: toplevel,
-    gitDir: resolve(repoPath, gitDir),
-    commonDir: resolve(repoPath, commonDir),
+    gitDir: resolve(toplevel, gitDir),
+    commonDir: resolve(toplevel, commonDir),
   };
 }
 

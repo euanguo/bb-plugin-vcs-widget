@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -68,7 +68,11 @@ const savedEnv = { ...process.env };
 const harness = experimental_createHostEntryHarness(hostEntry);
 
 beforeAll(async () => {
-  root = await mkdtemp(join(tmpdir(), "vcs-widget-host-"));
+  // Canonicalize the fixture root. git reports its toplevel with symlinks
+  // already resolved (macOS /var -> /private/var), and the host now compares
+  // real paths, so an unresolved /var fixture would disagree with every
+  // repoRoot the host derives from it.
+  root = await realpath(await mkdtemp(join(tmpdir(), "vcs-widget-host-")));
   repo = join(root, "repo");
   bare = join(root, "origin.git");
   other = join(root, "other");

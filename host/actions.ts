@@ -1,8 +1,8 @@
 // Mutations. Each one: validate, pre-flight, build a GitPlan, run it inside
 // the call's budget (or hand it to a background job), classify failures, and
 // return a fresh overview when there is time left to read one.
-import { stat } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { realpath, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { ActionResult, BranchRef, CheckoutTarget, GitError, Operation, Overview } from "../contracts";
 import type { PullStrategy, ResetMode } from "../shared/constants";
 import { classifyGitFailure, pluginGitError } from "../shared/git-errors";
@@ -376,9 +376,27 @@ export async function setUpstream(
   return succeed(context, upstream === null ? `${input.branch} no longer tracks a branch.` : `${input.branch} now tracks ${upstream}.`);
 }
 
+/** The path with symlinks resolved, or the resolved spelling when it cannot be read. */
+async function canonicalize(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
 export async function addWorktree(context: ActionContext, input: { ref: BranchRef; path: string }): Promise<ActionResult> {
   const phase: GitPhase = "worktree";
-  if (!isAbsolute(input.path) || resolve(dirname(input.path)) !== resolve(dirname(context.repo.repoRoot)) || resolve(input.path) === resolve(context.repo.repoRoot)) {
+  if (!isAbsolute(input.path)) {
+    return fail(context, pluginGitError("git_failed", "The worktree directory must be a sibling of the repository.", phase));
+  }
+  // Compare real paths, not resolved spellings. git reports its toplevel with
+  // symlinks already resolved (macOS `/var` -> `/private/var`, a symlinked
+  // home or checkout), while the requested path is still whatever the caller
+  // typed. Comparing the raw strings refused a perfectly good sibling.
+  const canonicalRoot = await canonicalize(context.repo.repoRoot);
+  const canonicalParent = await canonicalize(dirname(input.path));
+  if (canonicalParent !== dirname(canonicalRoot) || join(canonicalParent, basename(input.path)) === canonicalRoot) {
     return fail(context, pluginGitError("git_failed", "The worktree directory must be a sibling of the repository.", phase));
   }
   try {

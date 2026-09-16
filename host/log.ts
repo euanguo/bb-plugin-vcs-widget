@@ -78,7 +78,7 @@ const notFound = (sha: string): GitError => ({
  * resolve is "not a commit here": the row came from a log that may be stale,
  * or from a request that made the sha up.
  */
-async function resolveCommit(context: ActionContext, sha: string): Promise<{ sha: string; parent: string | null } | GitError> {
+export async function resolveCommit(context: ActionContext, sha: string): Promise<{ sha: string; parent: string | null } | GitError> {
   const result = await runGit(
     ["rev-list", "--max-count=1", "--parents", "--end-of-options", `${sha}^{commit}`, "--"],
     readOptions(context),

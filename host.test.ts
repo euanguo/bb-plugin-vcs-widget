@@ -873,8 +873,10 @@ describe("commit panel", () => {
     expect(state.lastCommit).toMatchObject({ subject: "Amended subject" });
     // The second edit of a.txt was never staged; new.txt was unstaged above.
     expect(state.files).toEqual([
-      { path: "a.txt", oldPath: null, index: ".", worktree: "M", kind: "tracked" },
-      { path: "new.txt", oldPath: null, index: ".", worktree: "?", kind: "untracked" },
+      // a.txt gained a line and lost none; new.txt is untracked, so its one
+      // line is counted off disk rather than diffed.
+      { path: "a.txt", oldPath: null, index: ".", worktree: "M", kind: "tracked", additions: 1, deletions: 0 },
+      { path: "new.txt", oldPath: null, index: ".", worktree: "?", kind: "untracked", additions: 1, deletions: 0 },
     ]);
   });
 
@@ -905,7 +907,7 @@ describe("commit panel", () => {
     expect(result).toMatchObject({ ok: true, message: "Discarded changes in 4 files: reverted 1 file, unstaged 1 file (kept on disk), deleted 2 files." });
     expect(await git(repo, "show", "HEAD:a.txt")).toBe((await exec("cat", [join(repo, "a.txt")])).stdout.trim());
     const state = await changes();
-    expect(state.files).toEqual([{ path: "added.txt", oldPath: null, index: ".", worktree: "?", kind: "untracked" }]);
+    expect(state.files).toEqual([{ path: "added.txt", oldPath: null, index: ".", worktree: "?", kind: "untracked", additions: 1, deletions: 0 }]);
     await expect(harness.experimental_call("discard", { repoPath: repo, restore: [], remove: [], clean: [] })).resolves.toMatchObject({ ok: false });
     await git(repo, "clean", "-fdq");
   });
@@ -1297,3 +1299,122 @@ describe("cherry-pick, revert and reset", () => {
     }
   });
 });
+
+describe("diff targets", () => {
+  let targetRepo: string;
+  const base = { kind: "local", name: "base-line" } as const;
+
+  beforeAll(async () => {
+    targetRepo = join(root, "target-repo");
+    await exec("git", ["init", "-q", "-b", "main", targetRepo], { env: GIT_ENV });
+    await commit(targetRepo, "keep.txt", "one\n", "base");
+    await commit(targetRepo, "gone.txt", "bye\n", "a file to rename");
+    await commit(targetRepo, "still.txt", "same\n", "a file that will not change");
+    await git(targetRepo, "branch", "base-line");
+    await git(targetRepo, "switch", "-q", "-c", "work");
+    await commit(targetRepo, "keep.txt", "one\ntwo\n", "edit keep");
+    await commit(targetRepo, "new.txt", "a\nb\n", "add new");
+    await git(targetRepo, "mv", "gone.txt", "moved.txt");
+    await git(targetRepo, "commit", "-q", "-m", "rename gone");
+  }, 60_000);
+
+  /** Rows in a fixed order, so the assertion does not depend on git sorting. */
+  const rows = (
+    files: { path: string; oldPath: string | null; worktree: string; additions: number | null; deletions: number | null }[],
+  ) =>
+    [...files]
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map((file) => [file.worktree, file.path, file.oldPath, file.additions, file.deletions]);
+
+  it("lists a range with the status letter, the counts and the commits it spans", async () => {
+    const result = await harness.experimental_call("diffTarget", { repoPath: targetRepo, target: { kind: "commits", base } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The letter is the diff own, not the index one: a range has no index side.
+    expect(rows(result.files)).toEqual([
+      ["M", "keep.txt", null, 1, 0],
+      ["R", "moved.txt", "gone.txt", 0, 0],
+      ["A", "new.txt", null, 2, 0],
+    ]);
+    expect(result.files.every((file) => file.index === ".")).toBe(true);
+    expect(result.commits.map((commit) => commit.subject)).toEqual(["rename gone", "add new", "edit keep"]);
+  });
+
+  it("lists one commit against its first parent, with no commit list", async () => {
+    const head = await git(targetRepo, "rev-parse", "HEAD");
+    const result = await harness.experimental_call("diffTarget", { repoPath: targetRepo, target: { kind: "commit", sha: head } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(rows(result.files)).toEqual([["R", "moved.txt", "gone.txt", 0, 0]]);
+    expect(result.commits).toEqual([]);
+  });
+
+  it("lists a root commit against nothing", async () => {
+    const rootSha = await git(targetRepo, "rev-list", "--max-parents=0", "HEAD");
+    const result = await harness.experimental_call("diffTarget", { repoPath: targetRepo, target: { kind: "commit", sha: rootSha } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(rows(result.files)).toEqual([
+      ["A", "keep.txt", null, 1, 0],
+    ]);
+  });
+
+  it("reads a batch of patches for a range and for one commit", async () => {
+    const range = await harness.experimental_call("diffTargetPatches", {
+      repoPath: targetRepo,
+      target: { kind: "commits", base },
+      paths: ["new.txt", "keep.txt"],
+    });
+    expect(range.ok).toBe(true);
+    if (!range.ok) return;
+    expect(range.files.map((file) => file.path)).toEqual(["new.txt", "keep.txt"]);
+    expect(range.files[0]?.patch).toContain("+a");
+    expect(range.files[1]?.patch).toContain("+two");
+
+    const head = await git(targetRepo, "rev-parse", "HEAD");
+    const commitRead = await harness.experimental_call("diffTargetPatches", {
+      repoPath: targetRepo,
+      target: { kind: "commit", sha: head },
+      // Both sides of the rename: git only reports one when the pathspec
+      // holds the path it came from as well as the path it went to.
+      paths: ["moved.txt", "gone.txt"],
+    });
+    expect(commitRead.ok).toBe(true);
+    if (!commitRead.ok) return;
+    expect(commitRead.files.find((file) => file.path === "moved.txt")?.patch).toContain("rename from gone.txt");
+
+    const rootSha = await git(targetRepo, "rev-list", "--max-parents=0", "HEAD");
+    const first = await harness.experimental_call("diffTargetPatches", {
+      repoPath: targetRepo,
+      target: { kind: "commit", sha: rootSha },
+      paths: ["keep.txt"],
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.files[0]?.patch).toContain("+one");
+  });
+
+  it("answers per path, blank for one the diff does not mention", async () => {
+    const result = await harness.experimental_call("diffTargetPatches", {
+      repoPath: targetRepo,
+      target: { kind: "commits", base },
+      paths: ["keep.txt", "still.txt"],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.files.map((file) => [file.path, file.patch.length > 0])).toEqual([
+      ["keep.txt", true],
+      ["still.txt", false],
+    ]);
+  });
+
+  it("refuses a sha and a branch that are not here", async () => {
+    expect(
+      await harness.experimental_call("diffTarget", { repoPath: targetRepo, target: { kind: "commit", sha: "0".repeat(40) } }),
+    ).toMatchObject({ ok: false, error: { code: "ref_not_found" } });
+    expect(
+      await harness.experimental_call("diffTarget", { repoPath: targetRepo, target: { kind: "commits", base: { kind: "local", name: "nope" } } }),
+    ).toMatchObject({ ok: false, error: { code: "ref_not_found" } });
+  });
+});
+

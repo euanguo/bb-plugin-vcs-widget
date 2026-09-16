@@ -3,7 +3,7 @@ import type { ChangeEntry } from "../contracts";
 import { groupByDirectory, groupByStatus, groupChanges, isGroupingMode, sortGroupsByWeight } from "./grouping";
 
 function entry(path: string, overrides: Partial<ChangeEntry> = {}): ChangeEntry {
-  return { path, oldPath: null, index: ".", worktree: "M", kind: "tracked", ...overrides };
+  return { path, oldPath: null, index: ".", worktree: "M", kind: "tracked", additions: null, deletions: null, ...overrides };
 }
 
 describe("grouping modes", () => {

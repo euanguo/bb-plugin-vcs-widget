@@ -54,6 +54,10 @@ one is a dialog this plugin does not have.
 | Discard (files new to git) | `git --literal-pathspecs rm -q --cached -- <paths>`; the file stays on disk as untracked |
 | Discard (untracked files) | `git --literal-pathspecs clean -f -- <paths>`; the file is deleted |
 | Diff preview | `git diff [--cached] -M --no-ext-diff -- <path>`, `git show HEAD:<path>` / `:<path>` for the two sides, `git diff --no-index -- /dev/null <path>` for an untracked file |
+| The file list's counts | `git diff --numstat -z -M HEAD --` for the whole tree at once (`--cached` on an unborn branch); an untracked file's counts are read off disk, because git has none for a file it does not track |
+| The diff pane, working tree | `git diff [--cached] --name-status\|--numstat -z -M -- <paths>` beside the patch above, one call per page of files |
+| The diff pane, a branch range | `git diff [--name-status\|--numstat] -z -M <base>...HEAD -- <paths>`, plus `git log --format=... -n <limit+1> <base>..HEAD --` for the commits the picker offers |
+| The diff pane, one commit | `git diff [--name-status\|--numstat] -z -M <parent> <sha> -- <paths>` (the root commit: `git show --format= -M <sha>` and `git diff-tree --root -r --name-status\|--numstat -z -M <sha>`) |
 | Agent Commit | no git at all: it sends "LGTM - Commit" to this thread's agent |
 | Agent Commit & Push | no git at all: it sends "LGTM - Commit & Push" to this thread's agent |
 

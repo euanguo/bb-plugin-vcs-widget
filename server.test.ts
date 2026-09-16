@@ -110,7 +110,7 @@ function defaultHostResult(call: HostCall): unknown {
   if (call.method === "jobGet") return null;
   if (call.method === "jobCancel") return { cancelled: true };
   if (call.method === "listTags") return { ok: true, tags: [], truncated: false };
-  if (call.method === "changes") return { ok: true, head: { kind: "branch", name: "main", sha: "abc1234" }, operation: "none", indexLocked: false, files: [{ path: "a.txt", oldPath: null, index: ".", worktree: "M", kind: "tracked" }], truncated: false, lastCommit: null };
+  if (call.method === "changes") return { ok: true, head: { kind: "branch", name: "main", sha: "abc1234" }, operation: "none", indexLocked: false, files: [{ path: "a.txt", oldPath: null, index: ".", worktree: "M", kind: "tracked", additions: 3, deletions: 1 }], truncated: false, lastCommit: null };
   if (call.method === "diffFile") return { ok: true, path: "a.txt", side: "worktree", patch: "", truncated: false, binary: false, contents: null };
   if (call.method === "log") return { ok: true, commits: [{ sha: "abc1234def", shortSha: "abc1234", author: "Costa", committedAt: 1, subject: "a change", refs: [], parents: [] }], skip: 0, hasMore: false };
   if (call.method === "commitDetails") {

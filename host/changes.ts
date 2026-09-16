@@ -5,12 +5,12 @@
 // path from `git status` can never turn into a glob or pathspec magic.
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import type { ActionResult, ChangesResult, CommitInput, DiffBatchResult, DiscardInput, FileDiff, GitError, Head, ImagePreview } from "../contracts";
+import type { ActionResult, ChangeEntry, ChangesResult, CommitInput, DiffBatchResult, DiscardInput, FileDiff, GitError, Head, ImagePreview } from "../contracts";
 import { CHANGES_LIMIT, MAX_IMAGE_BYTES, type DiffSide } from "../shared/constants";
-import { splitPatchIntoSections } from "../shared/diff-tiering";
+import { batchPatches, sideCommand, type BatchDiffEntry } from "./batch-diff";
 import { classifyGitFailure, pluginGitError, type GitPhase } from "../shared/git-errors";
 import { discardPlans, type GitPlan } from "../shared/model";
-import { parseCommitSummary, parseStatusEntries, parseStatusV2 } from "../shared/parse";
+import { parseCommitSummary, parseNumstat, parseStatusEntries, parseStatusV2 } from "../shared/parse";
 import {
   classifyOr,
   currentBranch,
@@ -33,11 +33,15 @@ import { detectOperation, isIndexLocked, preflight } from "./repo";
 
 export async function readChanges(context: ActionContext): Promise<ChangesResult> {
   const read = readOptions(context);
-  const [statusRaw, logRaw, operation, indexLocked] = await Promise.all([
+  const [statusRaw, logRaw, numstatRaw, operation, indexLocked] = await Promise.all([
     runGit(["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"], read),
     // "HEAD --": a file called HEAD in the worktree must not make the
     // revision ambiguous; an unborn branch has no HEAD and yields null.
     gitReadOrNull(["log", "-1", "--format=%H%x00%h%x00%B", "HEAD", "--"], read),
+    // Worktree and index together against HEAD: one `+N -M` per file, which
+    // is what the file list shows. Null on an unborn branch, which has no
+    // HEAD to diff against.
+    gitReadOrNull(["diff", "--numstat", "-z", "-M", "HEAD", "--"], read),
     detectOperation(context.repo.gitDir),
     isIndexLocked(context.repo.gitDir),
   ]);
@@ -57,15 +61,85 @@ export async function readChanges(context: ActionContext): Promise<ChangesResult
     const message = rest.join("\0").replace(/\n+$/u, "");
     if (sha !== "") lastCommit = { sha, shortSha, subject: message.split("\n")[0] ?? "", message };
   }
+  const limited = entries.slice(0, CHANGES_LIMIT);
   return {
     ok: true,
     head,
     operation,
     indexLocked,
-    files: entries.slice(0, CHANGES_LIMIT),
+    files: await withStats(context, limited, numstatRaw, read),
     truncated: entries.length > CHANGES_LIMIT,
     lastCommit,
   };
+}
+
+/** How much of one untracked file is read to count its lines. */
+const UNTRACKED_COUNT_LIMIT_BYTES = 128 * 1024;
+/** How much of all of them together, so a worktree of huge new files cannot stall the read. */
+const UNTRACKED_COUNT_BUDGET_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The lines an untracked file holds, or null when it is not text or too big
+ * to read. No diff of an untracked file exists, so counting is the only way
+ * to say how much it adds -- which is what a file list wants to show for a
+ * new file, and what every other Git UI shows too.
+ */
+async function countUntrackedLines(context: ActionContext, path: string): Promise<{ lines: number; bytes: number } | null> {
+  try {
+    const absolute = join(context.repo.repoRoot, path);
+    const info = await stat(absolute);
+    if (!info.isFile() || info.size > UNTRACKED_COUNT_LIMIT_BYTES) return null;
+    const text = await readFile(absolute, "utf8");
+    if (hasNul(text)) return null;
+    if (text === "") return { lines: 0, bytes: info.size };
+    return { lines: text.split("\n").length - (text.endsWith("\n") ? 1 : 0), bytes: info.size };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Attaches the `+N -M` column to the status rows.
+ *
+ * Tracked paths take their counts from git's own numstat, which is exact.
+ * Untracked paths are counted off disk, because git has nothing to diff them
+ * against -- and they are usually most of a new worktree, so leaving them
+ * blank would leave the column mostly empty. Anything else (a conflict, a
+ * path git did not report) is null rather than zero: the panel says "no
+ * numbers" instead of claiming the file changed nothing.
+ */
+async function withStats(
+  context: ActionContext,
+  entries: readonly Omit<ChangeEntry, "additions" | "deletions">[],
+  numstat: string | null,
+  read: ReturnType<typeof readOptions>,
+): Promise<ChangeEntry[]> {
+  // An unborn branch has no HEAD, so the index against the empty tree is the
+  // only baseline there is; `git diff --cached` is exactly that.
+  const raw = numstat ?? (await gitReadOrNull(["diff", "--numstat", "-z", "-M", "--cached", "--"], read));
+  const tracked = new Map<string, { additions: number; deletions: number; binary: boolean }>();
+  if (raw !== null) {
+    for (const file of parseNumstat(raw)) tracked.set(file.path, { additions: file.additions, deletions: file.deletions, binary: file.binary });
+  }
+  const files: ChangeEntry[] = [];
+  let countedBytes = 0;
+  for (const entry of entries) {
+    const known = tracked.get(entry.path);
+    if (known !== undefined) {
+      files.push({ ...entry, additions: known.binary ? null : known.additions, deletions: known.binary ? null : known.deletions });
+      continue;
+    }
+    if (entry.kind === "untracked" && countedBytes < UNTRACKED_COUNT_BUDGET_BYTES) {
+      const counted = await countUntrackedLines(context, entry.path);
+      if (counted !== null) {
+        countedBytes += counted.bytes;
+        files.push({ ...entry, additions: counted.lines, deletions: 0 });
+        continue;
+      }
+    }
+    files.push({ ...entry, additions: null, deletions: null });
+  }
+  return files;
 }
 
 async function worktreeFile(context: ActionContext, path: string): Promise<string | null> {
@@ -126,106 +200,16 @@ export async function diffFile(
 }
 
 /**
- * One combined `git diff` for many files on one side, split back into one
- * patch per path. `--name-status -z` is read alongside it and the two lists
- * are paired by position, which is what makes a rename's two paths resolve to
- * a single entry. When the counts disagree (a path vanished between the two
- * reads, or a section carried no `diff --git` line) the caller gets one
- * patch per requested path with whatever was found, so a stale path costs a
- * blank entry rather than the whole batch.
- *
- * The combined read is what keeps a long stream to one host call instead of
- * one per file, and `maxBytes` is the same per-file budget `diffFile` uses.
+ * One combined git diff for many files on one side, split back into one
+ * patch per path. The mechanics -- pairing --name-status -z with the
+ * sections of one combined patch -- live in ./batch-diff, because the
+ * commit and range targets read patches exactly the same way.
  */
 export async function diffFiles(
   context: ActionContext,
   input: { paths: readonly string[]; side: DiffSide },
-): Promise<{ path: string; patch: string; truncated: boolean; binary: boolean }[]> {
-  if (input.paths.length === 0) return [];
-  const read = readOptions(context);
-  const sideArgs = input.side === "index" ? ["--cached"] : [];
-  const blank = () =>
-    input.paths.map((path) => ({ path, patch: "", truncated: false, binary: false }));
-  const [patchRaw, nameStatusRaw] = await Promise.all([
-    runGit(
-      ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "-M", ...sideArgs, "--", ...input.paths],
-      read,
-    ),
-    runGit(["--literal-pathspecs", "diff", "--name-status", "-z", "-M", ...sideArgs, "--", ...input.paths], read),
-  ]);
-  // A batch that fails whole still answers per path, so one unreadable entry
-  // cannot blank the stream.
-  if (patchRaw.code !== 0 || nameStatusRaw.code !== 0) return blank();
-  const entries = parseNameStatusPaths(nameStatusRaw.stdout);
-  const sections = splitPatchIntoSections(patchRaw.stdout);
-  const patchByPath = new Map<string, string>();
-  if (entries.length === sections.length) {
-    for (let index = 0; index < entries.length; index += 1) {
-      const entry = entries[index];
-      const section = sections[index];
-      if (entry !== undefined && section !== undefined) patchByPath.set(entry.path, section);
-    }
-  }
-  const files = await Promise.all(
-    input.paths.map(async (path) => {
-      const raw = patchByPath.get(path);
-      if (raw !== undefined) {
-        const capped = capPatch(raw);
-        return { path, patch: capped.patch, truncated: capped.truncated, binary: capped.binary };
-      }
-      // `git diff` intentionally omits an untracked file. The single-file
-      // reader has always turned it into `--no-index /dev/null`; keep that
-      // behavior in the stream too, otherwise an untracked PNG is an empty
-      // text diff and can never reach the image preview below it.
-      const untracked =
-        input.side === "worktree" &&
-        (await isUntrackedFile(context, path));
-      if (!untracked) return { path, patch: "", truncated: false, binary: false };
-      const result = await runGit(
-        ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", path],
-        read,
-      );
-      // Exit 1 is git's normal "these files differ" result for --no-index.
-      if (result.code !== 0 && result.code !== 1) return { path, patch: "", truncated: false, binary: false };
-      const capped = capPatch(result.stdout);
-      return { path, patch: capped.patch, truncated: capped.truncated, binary: capped.binary };
-    }),
-  );
-  return files;
-}
-
-/** True only for an existing path git does not track. */
-async function isUntrackedFile(context: ActionContext, path: string): Promise<boolean> {
-  const read = readOptions(context);
-  const tracked = await runGit(["--literal-pathspecs", "ls-files", "--", path], read);
-  if (tracked.code !== 0 || tracked.stdout.trim() !== "") return false;
-  return stat(join(context.repo.repoRoot, path)).then((info) => info.isFile(), () => false);
-}
-
-/**
- * `git diff --name-status -z` as one entry per change. A rename or copy
- * prints `R<score>` and then both paths as separate NUL-terminated records,
- * so the pair is read together and the entry carries the new path.
- */
-function parseNameStatusPaths(raw: string): { path: string; oldPath: string | null }[] {
-  const tokens = raw.split("\0");
-  const entries: { path: string; oldPath: string | null }[] = [];
-  for (let index = 0; index < tokens.length; index += 1) {
-    const status = tokens[index] ?? "";
-    if (status.length === 0) continue;
-    const letter = status[0] ?? "";
-    if (letter === "R" || letter === "C") {
-      const oldPath = tokens[index + 1] ?? "";
-      const path = tokens[index + 2] ?? "";
-      index += 2;
-      if (path.length > 0) entries.push({ path, oldPath: oldPath.length > 0 ? oldPath : null });
-      continue;
-    }
-    const path = tokens[index + 1] ?? "";
-    index += 1;
-    if (path.length > 0) entries.push({ path, oldPath: null });
-  }
-  return entries;
+): Promise<BatchDiffEntry[]> {
+  return batchPatches(context, input.paths, sideCommand(input.side));
 }
 
 // ---------------------------------------------------------------------------

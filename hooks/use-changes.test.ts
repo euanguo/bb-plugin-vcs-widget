@@ -6,7 +6,7 @@ import { applyOverrides } from "./use-changes";
 import { diffSidesFor, stageState } from "../shared/model";
 
 function entry(path: string, overrides: Partial<ChangeEntry> = {}): ChangeEntry {
-  return { path, oldPath: null, index: ".", worktree: "M", kind: "tracked", ...overrides };
+  return { path, oldPath: null, index: ".", worktree: "M", kind: "tracked", additions: null, deletions: null, ...overrides };
 }
 
 function changes(files: ChangeEntry[]): ChangesResult {

@@ -212,6 +212,11 @@ function render(options: {
           ok: true,
           files: input.paths.map((path) => ({ path, patch: "@@ -1 +1 @@\n-a\n+b\n", truncated: false, binary: false })),
         }),
+        diffTargetPatches: (input) => ({
+          ok: true,
+          files: input.paths.map((path) => ({ path, patch: "@@ -1 +1 @@\n-a\n+b\n", truncated: false, binary: false })),
+        }),
+        diffTarget: () => ({ ok: true, files: [], commits: [], truncated: false }),
         imagePreview: (input: { path: string; mimeType: string }) => ({ ok: true, path: input.path, mimeType: input.mimeType, old: null, new: null }),
         stage: (input) => ({ ok: true, message: `Staged ${input.paths.length} file(s).`, overview: view }),
         unstage: (input) => ({ ok: true, message: `Unstaged ${input.paths.length} file(s).`, overview: view }),
@@ -238,10 +243,10 @@ const CHANGES: ChangesResult = {
   truncated: false,
   lastCommit: { sha: "a".repeat(40), shortSha: "aaaaaaa", subject: "Last one", message: "Last one\n\nBody" },
   files: [
-    { path: "staged.txt", oldPath: null, index: "M", worktree: ".", kind: "tracked" },
-    { path: "edited.txt", oldPath: null, index: ".", worktree: "M", kind: "tracked" },
-    { path: "both.txt", oldPath: null, index: "M", worktree: "M", kind: "tracked" },
-    { path: "new.txt", oldPath: null, index: ".", worktree: "?", kind: "untracked" },
+    { path: "staged.txt", oldPath: null, index: "M", worktree: ".", kind: "tracked", additions: 3, deletions: 1 },
+    { path: "edited.txt", oldPath: null, index: ".", worktree: "M", kind: "tracked", additions: 2, deletions: 0 },
+    { path: "both.txt", oldPath: null, index: "M", worktree: "M", kind: "tracked", additions: 5, deletions: 4 },
+    { path: "new.txt", oldPath: null, index: ".", worktree: "?", kind: "untracked", additions: 7, deletions: 0 },
   ],
 };
 
@@ -936,7 +941,7 @@ describe("CommitPanel", () => {
     // both.txt is staged and edited again, so it holds a row on each side, and
     // the staged change is the one that comes first.
     const rows = await slot.findAllByTestId(/^vcs-stream-row-both\.txt-/u);
-    expect(rows.map((row) => row.getAttribute("data-side"))).toEqual(["index", "worktree"]);
+    expect(rows.map((row) => row.getAttribute("data-channel"))).toEqual(["index", "worktree"]);
     expect(slot.getByTestId("vcs-stream-side-tag-both.txt-index").textContent).toBe("Staged");
     expect(slot.getByTestId("vcs-stream-side-tag-both.txt-worktree").textContent).toBe("Unstaged");
     // The mode switch is gone: there is nothing to pick.
@@ -952,6 +957,117 @@ describe("CommitPanel", () => {
     // file also has a staged row, hence the scoped lookup.
     await user.click(within(row).getByTestId("vcs-diff-gutter-both.txt"));
     expect(slot.inspection.composer.quotes).toEqual(["both.txt\n@@ -0,0 +1 @@\n+b"]);
+  });
+
+  it("drops a range's commit list when the base moves under it", async () => {
+    const user = userEvent.setup();
+    const commitsFor = (branch: string) => [
+      {
+        sha: (branch === "main" ? "a" : "b").repeat(40),
+        shortSha: branch === "main" ? "aaaaaaa" : "bbbbbbb",
+        author: "Costa",
+        committedAt: 2,
+        subject: branch === "main" ? "On main" : "On feature",
+      },
+    ];
+    const slot = renderCommitPanel({
+      rpc: {
+        diffTarget: (input: { target: { base?: { branch: string } } }) => ({
+          ok: true,
+          files: [],
+          commits: commitsFor(input.target.base?.branch ?? ""),
+          truncated: false,
+        }),
+      },
+    });
+    await slot.findAllByText("staged.txt");
+    await user.click(slot.getByTestId("vcs-diff-target"));
+    await user.click(await slot.findByRole("option", { name: /All commits vs origin\/main/u }));
+    // The list belongs to the base the range is measured from.
+    await user.click(slot.getByTestId("vcs-diff-target"));
+    expect(await slot.findByRole("option", { name: /On main/u })).toBeTruthy();
+    await user.keyboard("{Escape}");
+    await user.click(slot.getByTestId("vcs-diff-base"));
+    await user.click(await slot.findByRole("option", { name: "feature" }));
+    await waitFor(() => expect(slot.getByTestId("vcs-diff-base-label").textContent).toBe("feature"));
+    // A list kept past a base change would name commits the new range does not
+    // hold, which is worse than offering none at all: it is dropped at once,
+    // before the new base's own read lands.
+    await user.click(slot.getByTestId("vcs-diff-target"));
+    expect(slot.queryByRole("option", { name: /On main/u })).toBeNull();
+    expect(await slot.findByRole("option", { name: /On feature/u })).toBeTruthy();
+  });
+
+  it("hands the wrap toggle to the renderer, not only to the frame around it", async () => {
+    const user = userEvent.setup();
+    const slot = renderCommitPanel();
+    const row = await slot.findByTestId("vcs-stream-patch-both.txt-worktree");
+    // Whether a long line wraps is a renderer option, so relaxing the frame's
+    // own overflow is not enough: the renderer has to hear about it too.
+    const renderer = row.querySelector("[data-overflow]")!;
+    expect(renderer.getAttribute("data-overflow")).toBe("scroll");
+    await user.click(slot.getByTestId("vcs-diff-wrap"));
+    await waitFor(() => expect(renderer.getAttribute("data-overflow")).toBe("wrap"));
+  });
+
+
+  it("points the pane at a commit range and reads that range instead", async () => {
+    const user = userEvent.setup();
+    const commits = [{ sha: "c".repeat(40), shortSha: "ccccccc", author: "Costa", committedAt: 2, subject: "Second" }];
+    const slot = renderCommitPanel({
+      rpc: {
+        diffTarget: () => ({
+          ok: true,
+          files: [{ path: "committed.txt", oldPath: null, index: ".", worktree: "M", kind: "tracked", additions: 4, deletions: 1 }],
+          commits,
+          truncated: false,
+        }),
+      },
+    });
+    await slot.findAllByText("staged.txt");
+    // The pane starts on the working tree, with its own picker and no base.
+    expect(slot.getByTestId("vcs-diff-target-label").textContent).toBe("Uncommitted changes");
+    expect(slot.queryByTestId("vcs-diff-base")).toBeNull();
+    await user.click(slot.getByTestId("vcs-diff-target"));
+    await user.click(await slot.findByRole("option", { name: /All commits vs origin\/main/u }));
+    // The base is the branch the work will land on, and it is what the range
+    // is measured from.
+    await waitFor(() =>
+      expect(calls(slot, "diffTarget").at(-1)).toEqual({
+        threadId: "t1",
+        target: { kind: "commits", base: { kind: "remote", remote: "origin", branch: "main" } },
+      }),
+    );
+    expect(slot.getByTestId("vcs-diff-base-label").textContent).toBe("origin/main");
+    // The list is the range's, and it is read-only: a committed file has
+    // nothing to stage and nothing to discard.
+    const list = slot.getByTestId("vcs-file-list");
+    await waitFor(() => expect(list.querySelector('[data-path="committed.txt"]')).not.toBeNull());
+    const row = list.querySelector('[data-path="committed.txt"]')!;
+    expect(row.querySelector("[role=checkbox]")).toBeNull();
+    expect(row.querySelector("[data-testid=vcs-file-stats]")?.textContent).toBe("+4-1");
+    // Its patch comes from the target read, not from a side of the index.
+    await waitFor(() => expect(calls(slot, "diffTargetPatches").length).toBeGreaterThan(0));
+    expect(calls(slot, "diffTargetPatches").at(-1)).toMatchObject({
+      threadId: "t1",
+      target: { kind: "commits", base: { kind: "remote", remote: "origin", branch: "main" } },
+    });
+    expect(await slot.findByTestId("vcs-stream-row-committed.txt-target")).toBeTruthy();
+    // A target row wears no Staged/Unstaged tag: there is no index side to name.
+    expect(slot.queryByTestId("vcs-stream-side-tag-committed.txt-target")).toBeNull();
+  });
+
+  it("carries the line counts and the tick on the right of a file row", async () => {
+    const slot = renderCommitPanel();
+    await slot.findAllByText("staged.txt");
+    const list = slot.getByTestId("vcs-file-list");
+    const row = (path: string) => list.querySelector(`[data-path="${path}"]`)!;
+    // The counts sit beside the name; the tick is the last thing in the row,
+    // which is where a hand goes looking for it once the name is long.
+    expect(row("staged.txt").querySelector("[data-testid=vcs-file-stats]")?.textContent).toBe("+3-1");
+    expect(row("both.txt").querySelector("[data-testid=vcs-file-stats]")?.textContent).toBe("+5-4");
+    expect(row("edited.txt").querySelector("[data-testid=vcs-file-stats]")?.textContent).toBe("+2");
+    expect(row("staged.txt").lastElementChild?.getAttribute("role")).toBe("checkbox");
   });
 
   it("keeps the diffs on screen when a tick makes the panel re-read the tree", async () => {
@@ -1004,7 +1120,7 @@ describe("CommitPanel", () => {
         [...IntersectionObserverStub.instances]
           .reverse()
           .find((instance) => instance.options?.rootMargin === rootMargin);
-      const row = (element: HTMLElement) => ({ path: element.dataset.path, side: element.dataset.side });
+      const row = (element: HTMLElement) => ({ path: element.dataset.path, side: element.dataset.channel });
       // Start with everything on screen: both sides of both.txt read and render.
       newest("200px 0px")!.report(() => true);
       newest("800px 0px")!.report(() => true);
@@ -1113,7 +1229,7 @@ describe("CommitPanel", () => {
 
   it("discards a whole group from its header, and leaves Conflicts without the button", async () => {
     const user = userEvent.setup();
-    const conflicted = { path: "clash.txt", oldPath: null, index: "U", worktree: "U", kind: "conflicted" as const };
+    const conflicted = { path: "clash.txt", oldPath: null, index: "U", worktree: "U", kind: "conflicted" as const, additions: null, deletions: null };
     const slot = renderCommitPanel({ changes: { ...CHANGES, files: [...CHANGES.files, conflicted] } });
     await groupByStatus(user, slot);
     await slot.findAllByText("staged.txt");
@@ -1137,6 +1253,8 @@ describe("CommitPanel", () => {
       index: ".",
       worktree: "M",
       kind: "tracked" as const,
+      additions: null,
+      deletions: null,
     }));
     const slot = renderCommitPanel({ changes: { ...CHANGES, files } });
     await groupByStatus(user, slot);

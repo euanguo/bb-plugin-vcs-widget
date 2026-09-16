@@ -54,6 +54,12 @@ interface PluginDiffProps {
   path: string;
   /** Both complete sides when the caller has them, for context expansion. */
   contents?: PluginDiffContents | null;
+  /**
+   * Whether a long line wraps or scrolls sideways. Scrolling is the default
+   * because a wrapped diff is harder to read line by line, but a reader
+   * looking at prose in a narrow pane wants the wrap.
+   */
+  wrap?: boolean;
   className?: string;
 }
 
@@ -101,7 +107,7 @@ function coversLine(range: DiffLineRange, line: number, side: DiffLineSide): boo
   return rangeSide === null || rangeSide === side;
 }
 
-function PluginDiffView({ patch, path, contents = null, className }: PluginDiffProps) {
+function PluginDiffView({ patch, path, contents = null, wrap = false, className }: PluginDiffProps) {
   const composer = useComposer();
   const theme = experimental_useCodeTheme();
   // The range the reader last dragged, so the gutter button can quote all of
@@ -167,7 +173,7 @@ function PluginDiffView({ patch, path, contents = null, className }: PluginDiffP
       theme: theme.name,
       themeType: theme.mode,
       diffStyle: "unified" as const,
-      overflow: "scroll" as const,
+      overflow: wrap ? ("wrap" as const) : ("scroll" as const),
       disableFileHeader: true,
       lineHoverHighlight: "number" as const,
       enableGutterUtility: true,
@@ -183,7 +189,7 @@ function PluginDiffView({ patch, path, contents = null, className }: PluginDiffP
             : { start: lineRange.start, end: lineRange.end, side: lineRange.side ?? null, endSide: lineRange.endSide ?? null };
       },
     }),
-    [theme.name, theme.mode, expandable],
+    [theme.name, theme.mode, expandable, wrap],
   );
 
   if (metadata === null) {

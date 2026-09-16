@@ -27,11 +27,14 @@ interface FileDiffProps {
   renderGutterUtility?: (getHoveredLine: () => { lineNumber: number; side: DiffLineSide } | undefined) => ReactNode;
 }
 
-export function FileDiff({ fileDiff, renderGutterUtility }: FileDiffProps): ReactElement {
+export function FileDiff({ fileDiff, options, renderGutterUtility }: FileDiffProps): ReactElement {
+  // The overflow mode is the one option a test needs to see: it is what the
+  // wrap toggle changes, and a prop that never reaches this component is
+  // exactly the bug this exposes.
+  const overflow = (options as { overflow?: string } | undefined)?.overflow ?? "";
   return (
-    <div data-testid={"pierre-diff-" + fileDiff.name}>
+    <div data-testid={"pierre-diff-" + fileDiff.name} data-overflow={overflow}>
       {renderGutterUtility === undefined ? null : renderGutterUtility(() => hovered.line)}
     </div>
   );
 }
-

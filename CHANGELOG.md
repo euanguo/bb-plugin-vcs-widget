@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+- The commit panel's diff pane can be pointed at a revision instead of only at
+  the working tree. A picker in the pane's own header offers the uncommitted
+  changes, every commit this branch holds that a base branch does not, and any
+  one of those commits; the base is a second control that stays put while the
+  range stays selected, so comparing against another branch is one click and
+  never a re-selection. A target's file list is a read-only view of it: a
+  committed file has nothing to stage and nothing to discard, so the tick and
+  the discard button are left out rather than shown disabled. The row that
+  used to carry a sentence saying what the stream already showed now carries
+  those two controls, the `+N -M` the whole view adds up to, and a wrap toggle.
+- Every file row carries its own `+N -M`, from `git diff --numstat` and, for a
+  file git does not track yet, from reading the file. The tick moved to the
+  right-hand end of the row, the directory tree steps in nine pixels a level
+  instead of a comfortable indent, the pane seam is the hairline bb's own
+  panels draw, and the borders between rows are gone.
+- A long line wraps instead of scrolling sideways, from the toggle in the diff
+  pane's header and beside the file name in the log's drawer, remembered per
+  thread. It did not work when it was first added: the stream never passed the
+  option to the renderer, so only the frame around the diff relaxed. The test
+  renderer now reports the option it was given, which is what caught it.
+- The commit panel's two file lists draw the same row component and the same
+  status colours now. They had drifted: only one struck a deleted file
+  through, only one explained what its discard button does, and one showed a
+  file's basename where the other showed its path.
+- A sixty-file stream re-renders only the row whose own state changed. Every
+  row used to be handed fresh callbacks on each render, so one patch landing
+  redrew the whole column.
+- The diff stream mounts only the cards near the viewport, and reads a file's
+  patch when it comes into view rather than when the panel opens.
+- Four panels share one empty state: a workspace that is not a Git repository,
+  or one that is still provisioning, says so once instead of each panel
+  inventing its own error.
+- A repository is one repository. The host compared the paths it was handed
+  with the paths git reports, and git resolves symlinks, so on macOS `/var` and
+  `/private/var` looked like two repositories: a legal sibling worktree was
+  refused, the same git dir was watched twice, and its lock and job slots were
+  not shared.
 - The two agent buttons are out of the commit panel as well as in it: a strip
   above the message box carries Agent Commit and Agent Commit & Push, with the
   branch and how many files there are to commit, and the breakdown on the

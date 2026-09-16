@@ -24,7 +24,7 @@ function readOptions(context: ActionContext) {
  * the same name cannot shadow it), or a revision from the log resolved to
  * its commit sha.
  */
-async function verifyRef(context: ActionContext, ref: CompareRef): Promise<string | GitError> {
+export async function verifyRef(context: ActionContext, ref: CompareRef): Promise<string | GitError> {
   if (ref.kind === "revision") {
     const resolved = await runGit(
       ["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref.revision}^{commit}`],

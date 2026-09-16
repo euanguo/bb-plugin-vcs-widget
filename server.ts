@@ -485,6 +485,12 @@ export default async function plugin(bb: BbPluginApi) {
     diffFiles({ threadId, ...input }) {
       return withReadTarget(threadId, (repo) => host.call("diffFiles", { repoPath: repo.repoPath, ...input }, { hostId: repo.hostId }), readFailure);
     },
+    diffTargetPatches({ threadId, ...input }) {
+      return withReadTarget(threadId, (repo) => host.call("diffTargetPatches", { repoPath: repo.repoPath, ...input }, { hostId: repo.hostId }), readFailure);
+    },
+    diffTarget({ threadId, ...input }) {
+      return withReadTarget(threadId, (repo) => host.call("diffTarget", { repoPath: repo.repoPath, ...input }, { hostId: repo.hostId }), readFailure);
+    },
     imagePreview({ threadId, ...input }) {
       return withReadTarget(threadId, (repo) => host.call("imagePreview", { repoPath: repo.repoPath, ...input }, { hostId: repo.hostId }), readFailure);
     },

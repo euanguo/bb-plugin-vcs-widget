@@ -5,7 +5,7 @@
 // work (fetch, pull, push) is handed to a background job instead
 // (host/jobs.ts) and reports back through signals.
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
-import type { ActionResult, DiffBatchResult, GitError, ImagePreview, JobStart, Overview } from "./contracts";
+import type { ActionResult, DiffBatchResult, GitError, ImagePreview, JobStart, Overview, TargetFiles } from "./contracts";
 import { hostContract, hostSignals, unavailableOverview } from "./contracts";
 import type { JobKind } from "./shared/constants";
 import { pluginGitError } from "./shared/git-errors";
@@ -36,6 +36,7 @@ import {
 } from "./host/actions";
 import { createBudget, DEADLINES_MS, type Budget } from "./host/budget";
 import { diffFile, diffFiles, discard, imagePreview, prepareCommit, readChanges, stage, unstage } from "./host/changes";
+import { diffTarget, diffTargetPatches } from "./host/target-diff";
 import { compare, comparePatch, diffWorkingTree, diffWorkingTreePatch, listTags } from "./host/compare";
 import { GitSpawnError } from "./host/git";
 import { cancelJob, disposeJobs, jobState, startJob } from "./host/jobs";
@@ -292,6 +293,12 @@ export default experimental_defineHostEntry({
         async (action) => ({ ok: true, files: await diffFiles(action, input) }),
         (error) => ({ ok: false, error }),
       );
+    },
+    diffTargetPatches({ repoPath, ...input }, context) {
+      return withRepoRead<DiffBatchResult>(repoPath, context, (action) => diffTargetPatches(action, input), (error) => ({ ok: false, error }));
+    },
+    diffTarget({ repoPath, ...input }, context) {
+      return withRepoRead<TargetFiles>(repoPath, context, (action) => diffTarget(action, input), (error) => ({ ok: false, error }));
     },
     async imagePreview({ repoPath, ...input }, context) {
       return withRepoRead<ImagePreview>(

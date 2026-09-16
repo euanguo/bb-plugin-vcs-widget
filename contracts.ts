@@ -374,6 +374,14 @@ export const changeEntrySchema = z
     index: z.string().length(1),
     worktree: z.string().length(1),
     kind: z.enum(["tracked", "untracked", "conflicted"]),
+    /**
+     * Lines this file gained and lost against HEAD, for the file list's
+     * `+3 -1` column. Null when git would not say: a conflicted file, or an
+     * untracked one too large to count. Untracked files are counted from the
+     * file itself, because no diff of them exists.
+     */
+    additions: count.nullable(),
+    deletions: count.nullable(),
   })
   .strict();
 
@@ -638,6 +646,44 @@ const diffBatchFields = {
   paths: z.array(repoFilePathSchema).min(1).max(DIFF_PATCH_MAX_PATHS_PER_REQUEST),
   side: diffSideSchema,
 };
+
+/**
+ * Something the diff pane can be pointed at that is not the working tree:
+ * every commit the current branch holds that `base` does not, or one of them.
+ * The file list for either comes from `compare` and `commitDetails`; this is
+ * only the batch patch read the continuous stream runs on.
+ */
+export const diffTargetSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("commits"), base: compareRefSchema }).strict(),
+  z.object({ kind: z.literal("commit"), sha: shaSchema }).strict(),
+]);
+
+export type DiffTarget = z.infer<typeof diffTargetSchema>;
+
+/**
+ * The rows the diff pane renders for a target, and the commits it can be
+ * moved to next. One read answers both, so the picker and the list can never
+ * disagree about which commits are in view.
+ */
+export const targetFilesSchema = z.union([
+  z
+    .object({
+      ok: z.literal(true),
+      files: z.array(changeEntrySchema),
+      /** Empty unless the target is a range; the commits it spans, newest first. */
+      commits: z.array(commitSchema),
+      truncated: z.boolean(),
+    })
+    .strict(),
+  failure,
+]);
+
+export type TargetFiles = z.infer<typeof targetFilesSchema>;
+
+const diffTargetPatchFields = {
+  target: diffTargetSchema,
+  paths: z.array(repoFilePathSchema).min(1).max(DIFF_PATCH_MAX_PATHS_PER_REQUEST),
+};
 export const diffBatchResultSchema = z.union([
   z.object({ ok: z.literal(true), files: z.array(diffBatchEntrySchema) }).strict(),
   failure,
@@ -812,6 +858,14 @@ export const rpcContract = defineRpcContract({
   diffFiles: {
     input: threadInput.extend(diffBatchFields).strict(),
     output: diffBatchResultSchema,
+  },
+  diffTargetPatches: {
+    input: threadInput.extend(diffTargetPatchFields).strict(),
+    output: diffBatchResultSchema,
+  },
+  diffTarget: {
+    input: threadInput.extend({ target: diffTargetSchema }).strict(),
+    output: targetFilesSchema,
   },
   imagePreview: {
     input: threadInput.extend(imagePreviewFields).strict(),
@@ -989,6 +1043,14 @@ export const hostContract = defineRpcContract({
   diffFiles: {
     input: repoInput.extend(diffBatchFields).strict(),
     output: diffBatchResultSchema,
+  },
+  diffTargetPatches: {
+    input: repoInput.extend(diffTargetPatchFields).strict(),
+    output: diffBatchResultSchema,
+  },
+  diffTarget: {
+    input: repoInput.extend({ target: diffTargetSchema }).strict(),
+    output: targetFilesSchema,
   },
   imagePreview: {
     input: repoInput.extend(imagePreviewFields).strict(),

@@ -367,6 +367,8 @@ describe("commit panel entries", () => {
     index,
     worktree,
     kind: "tracked",
+    additions: null,
+    deletions: null,
     ...extra,
   });
   const untracked = entry(".", "?", { path: "u.txt", kind: "untracked" });

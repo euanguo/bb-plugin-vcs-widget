@@ -41,13 +41,17 @@ bb plugin install https://github.com/CostaFot/bb-plugin-vcs-widget --yes
 
 <img src="docs/screenshots/commit.png" alt="The commit panel with a file selected" width="420">
 
-- The working tree as Conflicts / Changes / Unversioned files, with IntelliJ's
-  status letters.
+- The working tree as a checklist, grouped by directory, by status or flat,
+  with IntelliJ's status letters and each file's `+N -M`.
 - The checkbox is the staged state: ticking runs `git add`, unticking
   `git reset`, a partly staged file shows a mixed box, and a group header
   toggles the whole group.
-- The selected file renders in bb's diff viewer, both sides complete, with a
-  Staged / Unstaged switch.
+- Every changed file's diff, stacked in one column with both sides in it: a
+  file that is staged and edited again shows both of its changes, each tagged
+  Staged or Unstaged, so nothing needs a mode switch to be seen. The pane can
+  be pointed at a branch range or at a single commit of it instead — read-only,
+  since a committed file has nothing to stage — and long lines wrap or scroll
+  from the toggle beside it.
 - Below it: the message (Ctrl+Enter commits), Amend, Sign-off, Run Git hooks,
   Commit and Commit and Push. The commit runs as a background job so hooks can
   take their time — their output streams into the panel, and Cancel stops them.

@@ -9,10 +9,28 @@
 // cannot overwrite a newer one.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DiffBatchResult } from "../contracts";
+import type { DiffTarget } from "../contracts";
 import { useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "../server";
+import type { DiffSide } from "../shared/constants";
 import { errorMessage } from "../lib/errors";
 import { chunkDiffPaths } from "../shared/diff-tiering";
+import { compareRefKey } from "../shared/target";
+
+/**
+ * What one reader answers for. A working-tree side is a batch read of its
+ * own, because `diffFiles` names exactly one side; everything else is a
+ * commit or a range, which has no second side to read.
+ */
+export type PatchRequest = { kind: "side"; side: DiffSide } | { kind: "target"; target: DiffTarget };
+
+/** A request as a string, for the identity a stored patch belongs to. */
+export function patchRequestKey(request: PatchRequest): string {
+  if (request.kind === "side") return request.side;
+  // The base is part of the identity: pointing the same "commits" target at
+  // another branch is a different set of patches, not a re-read of these.
+  return request.target.kind === "commit" ? `commit:${request.target.sha}` : `commits:${compareRefKey(request.target.base)}`;
+}
 
 /** One file's patch as the stream holds it. */
 export interface DiffPatchState {
@@ -45,7 +63,8 @@ export interface UseDiffPatchesResult {
 
 export function useDiffPatches(
   threadId: string,
-  side: string,
+  /** Null when this reader has no rows to answer for; it then fetches nothing. */
+  request: PatchRequest | null,
   enabled: boolean,
 ): UseDiffPatchesResult {
   const rpc = useRpc<typeof rpcContract>();
@@ -53,7 +72,7 @@ export function useDiffPatches(
 
   // The view these patches describe. Changing it means a different repository
   // or a different side of it, so nothing stored here is meaningful any more.
-  const identity = `${threadId}:${side}`;
+  const identity = request === null ? `${threadId}:none` : `${threadId}:${patchRequestKey(request)}`;
   const identityRef = useRef(identity);
   const pendingRef = useRef<{ visible: string[]; overscan: string[] }>({ visible: [], overscan: [] });
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -95,6 +114,7 @@ export function useDiffPatches(
 
   const fetchPaths = useCallback(
     async (paths: string[], requestedUnder: string) => {
+      if (request === null) return;
       const controller = new AbortController();
       controllersRef.current.add(controller);
       for (const path of paths) inFlightRef.current.add(path);
@@ -111,11 +131,10 @@ export function useDiffPatches(
         return changed ? next : previous;
       });
       try {
-        const result: DiffBatchResult = await rpc.call("diffFiles", {
-          threadId,
-          paths,
-          side: side as "index" | "worktree",
-        });
+        const result: DiffBatchResult =
+          request.kind === "side"
+            ? await rpc.call("diffFiles", { threadId, paths, side: request.side })
+            : await rpc.call("diffTargetPatches", { threadId, paths, target: request.target });
         // A branch switch or a newer working tree landed while this was in
         // flight: the answer describes a repository state that is gone.
         if (controller.signal.aborted || identityRef.current !== requestedUnder) return;
@@ -180,7 +199,7 @@ export function useDiffPatches(
         }
       }
     },
-    [rpc, threadId, side],
+    [rpc, threadId, request],
   );
 
   const dispatchPending = useCallback(() => {

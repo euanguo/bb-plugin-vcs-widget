@@ -22,6 +22,7 @@ import { CommitRow, type CommitMenuExtra } from "./CommitRow";
 import { ConfirmStep } from "./ConfirmStep";
 import { NewBranchStep } from "./NewBranchStep";
 import { PluginDiff } from "./PluginDiff";
+import { DiffWrapToggle, useDiffWrap } from "./DiffWrapToggle";
 import { RepositoryEmptyState } from "./RepositoryEmptyState";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -136,6 +137,7 @@ export function LogPanel({ threadId, params }: PanelProps) {
   const [details, setDetails] = useState<CommitDetails | "loading" | null>(null);
   const [file, setFile] = useState<FileChange | null>(null);
   const [patch, setPatch] = useState<PatchResult | "loading" | null>(null);
+  const [wrap, setWrap] = useDiffWrap(threadId);
   // The New Branch form, over the panel, with the commit as its start point.
   const [branchFrom, setBranchFrom] = useState<LogCommit | null>(null);
 
@@ -410,8 +412,9 @@ export function LogPanel({ threadId, params }: PanelProps) {
               </Button>
               <span className="min-w-0 flex-1 truncate font-medium">{file.path}</span>
               {commit !== null ? <span className="shrink-0 font-mono text-muted-foreground">{commit.shortSha}</span> : null}
+              <DiffWrapToggle wrap={wrap} onToggle={() => setWrap((value) => !value)} />
             </div>
-            <PatchView patch={patch} />
+            <PatchView patch={patch} wrap={wrap} />
           </>
         ) : commit === null ? (
           <Empty>Select a commit to see what it changed.</Empty>
@@ -511,16 +514,16 @@ function Details({
   );
 }
 
-function PatchView({ patch }: { patch: PatchResult | "loading" | null }) {
+function PatchView({ patch, wrap }: { patch: PatchResult | "loading" | null; wrap: boolean }) {
   if (patch === null) return <Empty>Select a file to see its diff.</Empty>;
   if (patch === "loading") return <Empty>Reading diff…</Empty>;
   if (!patch.ok) return <p className="p-4 text-sm text-destructive">{patch.error.message}</p>;
   if (patch.binary) return <Empty>Binary file.</Empty>;
   if (patch.patch.trim() === "") return <Empty>This commit does not change that file.</Empty>;
   return (
-    <div className="min-h-0 flex-1 overflow-auto" data-testid="vcs-patch">
+    <div className={cn("min-h-0 flex-1", wrap ? "overflow-y-auto" : "overflow-auto")} data-testid="vcs-patch">
       {patch.truncated ? <p className="px-3 py-1 text-xs text-muted-foreground">Diff truncated at 1 MiB.</p> : null}
-      <PluginDiff patch={patch.patch} path={patch.path} contents={patch.contents} />
+      <PluginDiff patch={patch.patch} path={patch.path} contents={patch.contents} wrap={wrap} />
     </div>
   );
 }

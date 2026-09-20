@@ -16,6 +16,7 @@ import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@/lib/utils";
 import type { DiffChannel } from "../shared/target";
 import { DIFF_FILES_INLINE_PATCH_MAX_FILES } from "../shared/diff-tiering";
+import { DIFF_WRAP_PIN_SETTLE_MS, PATCH_ROOT_MARGIN } from "../shared/constants";
 import type { DiffPatchState, UseDiffPatchesResult } from "../hooks/use-diff-patches";
 import type { DiffContentsState, UseDiffContentsResult } from "../hooks/use-diff-contents";
 import { previewableImageMime } from "../shared/constants";
@@ -49,6 +50,8 @@ interface ContinuousDiffStreamProps {
   /** Bumped whenever `changes` arrives, so stale patches are re-read. */
   filesUpdatedAt: unknown;
   isPanelOpen: boolean;
+  /** The panel's own splitter is being dragged, so pin before the first change. */
+  resizing?: boolean;
   /** Scroll here when the file list selects a path. */
   scrollToPath: string | null;
   onScrolledToPath: () => void;
@@ -92,6 +95,7 @@ export function ContinuousDiffStream({
   wrap,
   filesUpdatedAt,
   isPanelOpen,
+  resizing = false,
   scrollToPath,
   onScrolledToPath,
   collapsed,
@@ -100,6 +104,7 @@ export function ContinuousDiffStream({
   className,
 }: ContinuousDiffStreamProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const columnRef = useRef<HTMLDivElement | null>(null);
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // The readers a row reaches through. Kept behind refs so the handles handed
   // to a row keep their identity: a fresh closure per render would defeat the
@@ -155,61 +160,76 @@ export function ContinuousDiffStream({
   // Forget patches for files that left the list, and re-read the ones that are
   // still here after the working tree changed. Both sides move together: the
   // reader that has nothing to fetch does nothing.
+  //
+  // These call through the reader refs rather than listing `patches` and
+  // `contents` as dependencies. Those objects are rebuilt whenever any single
+  // patch lands, so depending on them re-ran this whole group — and rebuilt the
+  // observer below, re-observing every row — once per file that finished
+  // loading.
   useEffect(() => {
-    for (const channel of channels) patches[channel]?.prunePaths(paths);
-  }, [paths, channels, patches]);
+    for (const channel of channels) latestReaders.current.patches[channel]?.prunePaths(paths);
+  }, [paths, channels]);
   useEffect(() => {
-    for (const channel of channels) patches[channel]?.invalidate();
-  }, [filesUpdatedAt, channels, patches]);
+    for (const channel of channels) latestReaders.current.patches[channel]?.invalidate();
+  }, [filesUpdatedAt, channels]);
   // The full-text cache follows the same lifecycle as the patch cache.
   useEffect(() => {
-    for (const channel of channels) contents[channel]?.prune(paths);
-  }, [paths, channels, contents]);
+    for (const channel of channels) latestReaders.current.contents[channel]?.prune(paths);
+  }, [paths, channels]);
   useEffect(() => {
-    for (const channel of channels) contents[channel]?.invalidate();
-  }, [filesUpdatedAt, channels, contents]);
+    for (const channel of channels) latestReaders.current.contents[channel]?.invalidate();
+  }, [filesUpdatedAt, channels]);
 
-  // Only what is on screen (plus a little either side) is asked for. Where
-  // the environment has no IntersectionObserver (jsdom, an old webview) the
-  // first page is read instead, so the stream still shows diffs rather than
-  // nothing at all.
+  // Only what is on screen, plus the margin the observer is given, is asked
+  // for. The margin is the read-ahead: it used to be a separate list of every
+  // row that was *not* on screen, which is bounded by the size of the change
+  // set rather than by the viewport, so opening a four-hundred-file worktree
+  // could ask the host for all four hundred at once.
+  //
+  // Where the environment has no IntersectionObserver (jsdom, an old webview)
+  // the first page is read instead, so the stream still shows diffs rather
+  // than nothing at all.
   useEffect(() => {
     if (!isPanelOpen) return;
     const container = scrollRef.current;
     if (container === null) return;
-    const ask = (visible: Record<string, string[]>, overscan: Record<string, string[]>) => {
-      const withRenames = (list: readonly string[]) => [...new Set(list.flatMap((path) => (oldPathByPath.has(path) ? [path, oldPathByPath.get(path)!] : [path])))];
-      for (const channel of channels) {
-        patches[channel]?.requestPaths({ visible: withRenames(visible[channel] ?? []), overscan: withRenames(overscan[channel] ?? []) });
-      }
+    /** A rename is read by both of its paths; git reports neither alone. */
+    const withRenames = (list: readonly string[]) =>
+      [...new Set(list.flatMap((path) => (oldPathByPath.has(path) ? [path, oldPathByPath.get(path)!] : [path])))];
+    const ask = (byChannel: Record<string, string[]>) => {
+      const readers = latestReaders.current.patches;
+      for (const channel of channels) readers[channel]?.requestPaths(withRenames(byChannel[channel] ?? []));
     };
     if (typeof IntersectionObserver === "undefined") {
-      const first = entries.slice(0, DIFF_FILES_INLINE_PATCH_MAX_FILES);
-      const visible: Record<string, string[]> = {};
-      for (const channel of channels) visible[channel] = first.filter((item) => item.channel === channel).map((item) => item.entry.path);
-      ask(visible, {});
+      const first: Record<string, string[]> = {};
+      for (const channel of channels) {
+        first[channel] = entries
+          .filter((item) => item.channel === channel)
+          .slice(0, DIFF_FILES_INLINE_PATCH_MAX_FILES)
+          .map((item) => item.entry.path);
+      }
+      ask(first);
       return;
     }
     const observer = new IntersectionObserver(
       (observed) => {
         const visible: Record<string, string[]> = {};
-        const overscan: Record<string, string[]> = {};
         for (const record of observed) {
+          if (!record.isIntersecting) continue;
           const element = record.target as HTMLElement;
           const path = element.dataset.path;
           const channel = element.dataset.channel;
           if (path === undefined || channel === undefined) continue;
-          const bucket = record.isIntersecting ? visible : overscan;
-          (bucket[channel] ??= []).push(path);
+          (visible[channel] ??= []).push(path);
         }
         // Anything already loaded stays loaded; the hook filters.
-        ask(visible, overscan);
+        ask(visible);
       },
-      { root: container, rootMargin: "200px 0px" },
+      { root: container, rootMargin: PATCH_ROOT_MARGIN },
     );
     for (const element of rowRefs.current.values()) observer.observe(element);
     return () => observer.disconnect();
-  }, [entries, channels, isPanelOpen, patches]);
+  }, [entries, channels, isPanelOpen, oldPathByPath]);
 
   // The mount window. Separate from the reader above because it answers a
   // different question — "is this card close enough to keep rendered?" — with a
@@ -244,6 +264,83 @@ export function ContinuousDiffStream({
     return () => observer.disconnect();
   }, [entries, isPanelOpen]);
 
+  // The pane is being resized, and a wrapping diff is expensive to resize.
+  //
+  // With `overflow: wrap` the renderer lays a diff out as a grid whose two
+  // columns each span every row, so a width change makes the browser re-wrap
+  // the whole diff and re-solve that grid. Measured on a 2000px card: about
+  // 180ms a frame, 59 of 60 frames over 33ms, and eleven seconds of work for a
+  // one-second animation. The same change with `overflow: scroll` costs 0-1ms,
+  // because nothing re-wraps.
+  //
+  // The library offers nothing for it — its ResizeManager only writes column
+  // width variables — so the content is pinned instead: while the pane is
+  // resized, the column keeps the width it had at rest, so there is nothing to
+  // re-wrap, and it is released once the resize settles. One relayout at the
+  // end of a drag instead of one per frame. Only in wrap mode: with scroll the
+  // content follows the drag exactly as before, at no cost.
+  const entriesEmpty = entries.length === 0;
+  useEffect(() => {
+    if (!wrap || entriesEmpty) return;
+    const container = scrollRef.current;
+    const column = columnRef.current;
+    if (container === null || column === null) return;
+    let settled = Math.round(container.getBoundingClientRect().width);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const pin = (width: number) => {
+      column.style.width = `${width}px`;
+      column.style.minWidth = `${width}px`;
+    };
+    const release = () => {
+      column.style.width = "";
+      column.style.minWidth = "";
+    };
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((observed) => {
+      const entry = observed[observed.length - 1];
+      if (entry === undefined) return;
+      const width = Math.round(entry.contentRect.width);
+      if (resizing) {
+        // The panel's own splitter pins before the first change reaches this
+        // observer, and owns the release. All this has to do is keep track of
+        // where the drag has got to, so that releasing does not snap the
+        // content back to the width the drag started at.
+        settled = width;
+        return;
+      }
+      if (width !== settled) pin(settled);
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        release();
+        settled = Math.round(container.getBoundingClientRect().width);
+      }, DIFF_WRAP_PIN_SETTLE_MS);
+    });
+    observer.observe(container);
+    return () => {
+      observer.disconnect();
+      if (timer !== null) clearTimeout(timer);
+      release();
+    };
+  }, [wrap, entriesEmpty, resizing]);
+
+  // A resize this stream is driving itself starts here, before the first width
+  // change has been laid out — a resize the observer sees has already been paid
+  // for once, which is the frame the drag begins on.
+  useEffect(() => {
+    if (!wrap || !resizing || entriesEmpty) return;
+    const container = scrollRef.current;
+    const column = columnRef.current;
+    if (container === null || column === null) return;
+    const width = Math.round(container.getBoundingClientRect().width);
+    column.style.width = `${width}px`;
+    column.style.minWidth = `${width}px`;
+    return () => {
+      column.style.width = "";
+      column.style.minWidth = "";
+    };
+  }, [wrap, resizing, entriesEmpty]);
+
   useEffect(() => {
     if (scrollToPath === null) return;
     // A file with two rows scrolls to its first one.
@@ -266,7 +363,8 @@ export function ContinuousDiffStream({
   return (
     <div className={cn("flex min-h-0 flex-1 flex-col", className)}>
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto" data-testid="vcs-stream">
-        <div className="flex min-w-0 flex-col">
+        {/* The column a resize pins: see the pin effect above. */}
+        <div ref={columnRef} className="flex min-w-0 flex-col" data-testid="vcs-stream-column">
           {entries.map((item) => {
             const key = streamRowKey(item);
             return (

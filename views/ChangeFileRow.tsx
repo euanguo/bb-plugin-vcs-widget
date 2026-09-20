@@ -6,7 +6,7 @@
 // through and the other did not), so the row lives here once and the list
 // chooses only what is genuinely its own: what the file is called and how far
 // it steps in.
-import { Fragment, type ReactNode } from "react";
+import { Fragment, memo } from "react";
 import type { ChangeEntry } from "../contracts";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -20,6 +20,7 @@ import {
 import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@/lib/utils";
 import { fileMenuFor, stageState, statusLetter, type FileMenuItemId } from "../shared/model";
+import { CHANGE_LIST_ROW_HEIGHT } from "../shared/constants";
 import { statusLetterClass } from "./status-letter";
 import { FileStats } from "./FileStats";
 
@@ -37,8 +38,14 @@ const FLAT_OFFSET = 8;
 
 export interface ChangeFileRowProps {
   entry: ChangeEntry;
-  /** What the row calls the file: a basename in the tree, the path when flat. */
-  label: ReactNode;
+  /** What the row calls the file: a basename in a tree, the path when flat. */
+  label: string;
+  /**
+   * Which of the two `label` is. A flat list has no directory row above it to
+   * say where the file lives, so it spells the path out and marks a rename in
+   * the label; a tree leaves the rename to the row's tooltip.
+   */
+  labelKind: "name" | "path";
   /** The tree's depth, or null for a list that does not step in. */
   depth: number | null;
   selected: boolean;
@@ -65,9 +72,20 @@ export function entryLetter(entry: ChangeEntry): string {
   return statusLetter(entry);
 }
 
-export function ChangeFileRow({
+/**
+ * One changed file.
+ *
+ * Memoized, and it has to be: a worktree with hundreds of changed files puts
+ * hundreds of these in the list, every one of them a Radix context menu, a
+ * checkbox and a few spans, and a drag of the splitter used to rebuild all of
+ * them once a frame. `label` is a string rather than a node for the same
+ * reason — a node built by the caller would be a new object every render and
+ * the memo would never hit.
+ */
+export const ChangeFileRow = memo(function ChangeFileRow({
   entry,
   label,
+  labelKind,
   depth,
   selected,
   readOnly,
@@ -82,13 +100,14 @@ export function ChangeFileRow({
   const letter = entryLetter(entry);
   const conflicted = entry.kind === "conflicted";
   const menuItems = fileMenuFor(entry, { blocked: disabled || pending ? "Another VCS action is still running." : null });
+  const renamed = entry.oldPath !== null && entry.oldPath !== entry.path;
   const row = (
     <li
       className={cn(
         "group flex min-w-0 items-center gap-1.5 py-0.5 pr-2 text-xs hover:bg-accent",
         selected && "bg-accent",
       )}
-      style={{ paddingLeft: `${depth === null ? FLAT_OFFSET : INDENT_BASE + depth * INDENT_STEP + FILE_OFFSET}px` }}
+      style={{ height: CHANGE_LIST_ROW_HEIGHT, paddingLeft: `${depth === null ? FLAT_OFFSET : INDENT_BASE + depth * INDENT_STEP + FILE_OFFSET}px` }}
       data-path={entry.path}
       data-stage={state}
     >
@@ -102,7 +121,16 @@ export function ChangeFileRow({
         <span className={cn("w-3 shrink-0 text-center font-mono font-semibold", statusLetterClass(letter))} aria-label={`status ${letter}`}>
           {letter}
         </span>
-        <span className={cn("min-w-0 flex-1 truncate", state === "partial" && "italic")}>{label}</span>
+        <span className={cn("min-w-0 flex-1 truncate", state === "partial" && "italic")}>
+          {labelKind === "path" && renamed ? (
+            <>
+              <span className="text-muted-foreground">{entry.oldPath} → </span>
+              {label}
+            </>
+          ) : (
+            label
+          )}
+        </span>
       </button>
       <FileStats additions={entry.additions} deletions={entry.deletions} />
       {readOnly ? null : (
@@ -153,4 +181,4 @@ export function ChangeFileRow({
       </ContextMenuContent>
     </ContextMenu>
   );
-}
+});

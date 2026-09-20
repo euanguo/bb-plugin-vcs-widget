@@ -44,7 +44,7 @@ export function BranchButton({ threadId, isCompactViewport }: BranchButtonProps)
   // can only come from the overview.
   const offSidebar = sidebar.status === "ready" && !sidebar.found;
   const enabled = everOpened || offSidebar;
-  const { overview, loading, error, refetch, applyOverview } = useOverview({
+  const { overview, loading, error, refreshIfStale, applyOverview } = useOverview({
     threadId,
     environmentId: sidebar.environmentId,
     enabled,
@@ -61,17 +61,19 @@ export function BranchButton({ threadId, isCompactViewport }: BranchButtonProps)
   const refetchFavourites = favourites.refetch;
   const openPopup = useCallback(() => {
     // Reopening: read the repository again, so a lock or an external checkout
-    // shows without an action. A confirmed action closed the popup and
-    // reported by toast, so its outcome is kept for a minute -- dated, and
-    // alongside the summary -- and only then forgotten.
+    // shows without an action -- unless another surface read it moments ago,
+    // in which case that answer is painted instead of waiting on a round trip
+    // for the same thing. A confirmed action closed the popup and reported by
+    // toast, so its outcome is kept for a minute -- dated, and alongside the
+    // summary -- and only then forgotten.
     clearStatus(STATUS_RETAIN_MS);
     if (everOpenedRef.current) {
-      void refetch();
+      void refreshIfStale();
       void refetchFavourites();
     }
     setEverOpened(true);
     setOpen(true);
-  }, [clearStatus, refetch, refetchFavourites]);
+  }, [clearStatus, refreshIfStale, refetchFavourites]);
 
   const openPanel = useCallback(
     (actionId: string, title: string, params: Record<string, unknown>) => {

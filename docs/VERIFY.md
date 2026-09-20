@@ -8,8 +8,9 @@ running bb: `scripts/live-check.mjs` for milestone 1, `scripts/live-check-m2.mjs
 for milestone 2, `scripts/live-check-m3.mjs` for milestone 3,
 `scripts/live-check-m4.mjs` for milestone 4, `scripts/live-check-m5.mjs` for
 milestone 5, `scripts/live-check-m6.mjs` for the commit panel's later
-additions and `scripts/live-check-m7.mjs` for the strip above the message
-box, all on `scripts/live-lib.mjs`.
+additions, `scripts/live-check-m7.mjs` for the strip above the message box and
+`scripts/live-check-m8.mjs` for what the popup and the commit panel cost on a
+large repository, all on `scripts/live-lib.mjs`.
 
 ## Setup
 
@@ -49,6 +50,16 @@ VCS_E2E_THREAD=thr_xxx VCS_E2E_PROJECT=proj_xxx \
   node scripts/live-check-m6.mjs /tmp/vcs-scratch
 VCS_E2E_THREAD=thr_xxx VCS_E2E_PROJECT=proj_xxx \
   node scripts/live-check-m7.mjs /tmp/vcs-scratch
+VCS_E2E_THREAD=thr_xxx VCS_E2E_PROJECT=proj_xxx \
+  node scripts/live-check-m8.mjs /tmp/vcs-scratch
+```
+
+Milestone 8 also takes `--read-only`, which measures the thread's repository
+as it is and creates nothing:
+
+```sh
+VCS_E2E_THREAD=thr_xxx VCS_E2E_PROJECT=proj_xxx \
+  node scripts/live-check-m8.mjs /path/to/a/worktree --read-only
 ```
 
 Milestone 6 sends a real "LGTM - Commit" to `VCS_E2E_THREAD`, which starts a
@@ -319,6 +330,66 @@ Manual, on top of the script:
    line, and a toast quotes it back — the same `sendToAgent` the panel's
    buttons use, which `server.test.ts` covers against `AGENT_ACTIONS`.
 
+## What the popup and the panel cost (`live-check-m8.mjs`)
+
+The other milestones check that the surfaces work. This one checks that they
+stay cheap when a thread's worktree holds hundreds of branches and hundreds of
+changed files, and it is the only script that reports numbers rather than pass
+or fail alone: every step prints what it measured next to its budget.
+
+Without `--read-only` it makes its own fixture in the repository it is given —
+300 branches and 400 untracked files, removed again on the way out — so **never
+point it at a repository you care about**. With `--read-only` it creates
+nothing at all, which is how it is run against a real thread.
+
+Step 11 is the exception to "a synthetic fixture proves it": the cost it guards
+against only appears when a real diff is mounted, because it is the browser
+re-wrapping that diff. It turns the wrap toggle on for the length of the check
+and puts the reader's preference back afterwards, and it prints the numbers
+either way.
+
+No step clicks a branch row, stages a file or commits. It measures by reading
+the DOM and by timing work in the page itself: one `PerformanceObserver` per
+stretch of interaction and a `requestAnimationFrame` loop for frames, with the
+splitter driven by pointer events dispatched inside the page. A driven *mouse*
+is not used on purpose — against this page it costs about a second a frame on
+its own, which is an artefact of the harness rather than of the plugin, and
+measuring with it once produced a confident and entirely wrong answer.
+
+Measured against `tea-app-im` (210 local and 200 remote branches, 459 changed
+files) on 2026-09-18, before and after the windowing:
+
+| | before | after | budget |
+|---|---|---|---|
+| rows the popup renders | 425 | 24 | 40 |
+| popup open, main-thread work | 820 ms | 0 ms | 400 ms |
+| one keystroke in the search box | 66–192 ms | 2–18 ms | no long task |
+| rows the changed-file list renders | 502 | 32 | 80 |
+| nodes in the commit panel | 11 346 | 5 108 | 6 000 |
+| a twenty-step splitter drag | 1 912 ms | 0 ms | 500 ms |
+| storage writes in that drag | one per pointermove | 1 | 1 |
+| average frame during that drag | 70 ms | 17 ms | — |
+
+And the one that is not about this change at all, found afterwards by reading
+the report of a reader whose diff is 2000px tall: **a width change with
+`overflow: wrap` costs about 180 ms** against 0-1 ms with `overflow: scroll`.
+The renderer lays a wrapping diff out as a grid whose two columns each span
+every row, so each change re-wraps the whole diff and re-solves that grid; the
+library has no option for it (`ResizeManager` only writes column-width
+variables). Sixty width changes, no input involved:
+
+| sixty width changes, wrap on | before | after |
+|---|---|---|
+| median frame | 180 ms | 17 ms |
+| frames over 33 ms | 59 of 60 | 1 of 60 |
+| total | 10 913 ms | 1 298 ms |
+| long tasks | 33 390 ms | 431 ms |
+
+The plugin now pins the diff's own width for the length of a resize and releases
+it when the resize settles, so the content re-lays-out once at the end instead
+of once a frame. It applies only in wrap mode: with scrolling lines the content
+follows the drag exactly as it always did, at no cost.
+
 ## Last run
 
 2026-09-09, bb 0.42.1, git 2.55, one local machine: milestone 1 scenarios
@@ -336,6 +407,17 @@ its `data-state`. It also writes a screenshot. Radix reaches the plugin through
 bb's shared runtime (`globalThis.__bbPluginRuntime`), not a bundled copy, so
 the layer bookkeeping that owns `pointer-events` is one instance across bb and
 the plugin, and split module state is not the explanation.
+
+2026-09-18, bb 0.43.2-nightly, git 2.49, one local machine: the performance
+milestone passes headlessly, all twelve steps, against a real thread's worktree
+(`tea-app-im`, 210 local and 200 remote branches, 459 changed files) in
+`--read-only` mode. Its numbers are the table above. The same day, `npm run
+check` was green at 514 tests over 22 files, of which 83 are the app's under
+jsdom and now include the popup's window, the changed-file list's window, and
+one storage write per splitter drag. Milestones 1 and 3 were **not** rerun
+against a scratch repository: they need a thread whose environment is one, and
+that thread does not exist on this machine. They are the first thing to run
+after creating one.
 
 The commit panel additions (six scenarios) pass headlessly on the same
 machine, 2026-09-09, and milestone 3 was rerun whole against the restructured

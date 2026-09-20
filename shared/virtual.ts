@@ -43,3 +43,37 @@ export function visibleRange({ scrollTop, viewportHeight, rowHeight, count, over
   const start = Math.max(0, Math.min(first, total));
   return window(start, Math.min(total, start + visible));
 }
+
+/**
+ * The `scrollTop` that brings one row into view, moving the container as
+ * little as it can. A row already fully visible is left alone, which is what
+ * makes the keyboard walk a list without the list jumping under it.
+ *
+ * The caller sets `scrollTop` and the row index in the same update, so the
+ * window the next render computes from the new offset already contains the
+ * row. Doing it the other way round — move the highlight, then scroll in an
+ * effect — leaves one paint where the highlighted row is not mounted.
+ */
+export function scrollTopForRow({
+  index,
+  rowHeight,
+  scrollTop,
+  viewportHeight,
+}: {
+  index: number;
+  rowHeight: number;
+  scrollTop: number;
+  /** 0 before the container has been measured. */
+  viewportHeight: number;
+}): number {
+  if (index < 0 || rowHeight <= 0) return Math.max(0, scrollTop);
+  const offset = Math.max(0, scrollTop);
+  const top = index * rowHeight;
+  const bottom = top + rowHeight;
+  // Unmeasured: put the row at the top rather than guess at a viewport.
+  if (viewportHeight <= 0) return top;
+  if (top < offset) return top;
+  if (bottom > offset + viewportHeight) return bottom - viewportHeight;
+  return offset;
+}
+

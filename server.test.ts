@@ -146,6 +146,35 @@ describe("server", () => {
     ]);
   });
 
+  it("folds simultaneous reads of one repository into a single host call", async () => {
+    // The banner, the popup and a panel can all want the repository at once.
+    // The read is held open so all three arrive before any of them is answered.
+    let answer!: (value: unknown) => void;
+    const held = new Promise((resolve) => {
+      answer = resolve;
+    });
+    const { bb, harness, hostCalls } = setup({
+      hostResult: (call) => (call.method === "overview" ? held : defaultHostResult(call)),
+    });
+    await plugin(bb);
+    const reads = Promise.all([
+      harness.behavior.callRpc("overview", { threadId: "t1" }),
+      harness.behavior.callRpc("overview", { threadId: "t1" }),
+      harness.behavior.callRpc("overview", { threadId: "t1" }),
+    ]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hostCalls.filter((call) => call.method === "overview")).toHaveLength(1);
+
+    answer(overview());
+    const [first, second, third] = (await reads) as Overview[];
+    expect(first.head).toEqual({ kind: "branch", name: "main", sha: "abc1234" });
+    expect(second).toEqual(first);
+    expect(third).toEqual(first);
+    // And nothing is cached: the next read is a real one.
+    expect(await harness.behavior.callRpc("overview", { threadId: "t1" })).toEqual(first);
+    expect(hostCalls.filter((call) => call.method === "overview")).toHaveLength(2);
+  });
+
   it("reports an environment that is not ready without calling the host", async () => {
     const { bb, harness, hostCalls } = setup({
       environment: { ...READY_ENVIRONMENT, status: "provisioning" },

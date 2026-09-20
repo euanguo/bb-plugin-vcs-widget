@@ -11,6 +11,9 @@ afterEach(() => {
   // The panel persists view preferences (grouping, tree folding, split width)
   // per thread; without this they leak from one test into the next.
   window.localStorage.clear();
+  // The overview's freshness window is module scope, so it outlives the
+  // unmount that `cleanup` does.
+  clearOverviewCache();
 });
 
 /**
@@ -24,8 +27,10 @@ function advanceClock(ms: number): void {
 import type { PluginThreadPanelProps } from "@get-bb/plugin-sdk/app";
 import type { ActionResult, ChangesResult, JobStart, LogCommit, Overview } from "./contracts";
 import type { JobKind } from "./shared/constants";
+import { CHANGE_LIST_ROW_HEIGHT, CHANGE_LIST_WINDOW_OVERSCAN, DIFF_WRAP_PIN_SETTLE_MS, PANE_WIDTH, PATCH_ROOT_MARGIN, POPUP_ROW_HEIGHT, POPUP_WINDOW_OVERSCAN } from "./shared/constants";
 import { unavailableOverview } from "./contracts";
 import { requestOpen } from "./lib/events";
+import { clearOverviewCache } from "./shared/overview-cache";
 import type { rpcContract } from "./server";
 
 // jsdom lacks the layout APIs Radix and cmdk touch.
@@ -419,11 +424,31 @@ describe("BranchButton", () => {
     await within(popup).findByText("The repository index is locked.");
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("vcs-branch-popup")).toBeNull());
+    // Long enough that what was read is no longer good enough to paint: a lock
+    // or an external checkout has to be able to show up.
+    advanceClock(3_000);
     await user.click(slot.getByTestId("vcs-branch-button"));
     popup = await screen.findByTestId("vcs-branch-popup");
     await waitFor(() => expect(methods(slot)).toEqual(["overview", "checkout", "overview"]));
     expect(within(popup).queryByText("The repository index is locked.")).not.toBeNull();
     expect((within(popup).getByLabelText("Search for branches and actions") as HTMLInputElement).value).toBe("");
+  });
+
+  it("paints a read that is still fresh when reopened instead of waiting on another", async () => {
+    const user = userEvent.setup();
+    const slot = render();
+    await user.click(slot.getByTestId("vcs-branch-button"));
+    await screen.findByTestId("vcs-branch-popup");
+    await waitFor(() => expect(methods(slot)).toEqual(["overview"]));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("vcs-branch-popup")).toBeNull());
+
+    // Reopening straight away: the same branch list, without a second read of
+    // the repository behind it.
+    await user.click(slot.getByTestId("vcs-branch-button"));
+    const popup = await screen.findByTestId("vcs-branch-popup");
+    expect(await within(popup).findAllByText("feature")).toHaveLength(2);
+    expect(methods(slot)).toEqual(["overview"]);
   });
 
   it("dates a retained outcome and shows the repository under it", async () => {
@@ -496,6 +521,244 @@ describe("BranchButton", () => {
   it("reads the overview for a thread bb's sidebar does not list", async () => {
     const slot = render({ offSidebar: true, overview: overview({ head: { kind: "branch", name: "hidden-branch", sha: "abc1234" } }) });
     await waitFor(() => expect(slot.getByTestId("vcs-branch-button").textContent).toContain("hidden-branch"));
+  });
+});
+
+/**
+ * The popup used to render every branch it knew about. It now renders a window
+ * over them, and these are the properties that must survive: the DOM stays
+ * bounded whatever the repository holds, nothing becomes unreachable, the
+ * highlight still walks the list, and Home/End still mean the ends of the
+ * list rather than the ends of the window.
+ *
+ * jsdom has no layout, so the container is given a height the way it is given
+ * `matchMedia` and `scrollIntoView` above: a viewport of ten rows at the
+ * popup's own row height. `scrollIntoView` is emulated for the same reason —
+ * cmdk keeps the highlight in view with it, and the browser's scroll event is
+ * what moves the window, so without it the test would not exercise the loop.
+ */
+describe("popup window", () => {
+  const ROW = POPUP_ROW_HEIGHT;
+  const VIEWPORT_ROWS = 10;
+
+  /** A repository with more branches than any popup should render at once. */
+  function manyBranches(count: number) {
+    return overview({
+      local: [
+        { name: "main", sha: "abc1234", upstream: "origin/main", ahead: 0, behind: 0, gone: false, isCurrent: true, worktreePath: null, committedAt: 1, subject: "" },
+        ...Array.from({ length: count }, (_, index) => ({
+          name: `perf-${String(index).padStart(4, "0")}`,
+          sha: "abc1234",
+          upstream: null,
+          ahead: 0,
+          behind: 0,
+          gone: false,
+          isCurrent: false,
+          worktreePath: null,
+          committedAt: 1,
+          subject: "",
+        })),
+      ],
+      remote: [],
+      recent: [],
+    });
+  }
+
+  /** Every row the window put in the DOM, in order. */
+  const renderedItems = (popup: HTMLElement): HTMLElement[] =>
+    Array.from(popup.querySelectorAll<HTMLElement>("[cmdk-item]"));
+  const renderedNames = (popup: HTMLElement) =>
+    renderedItems(popup).map((item) => item.getAttribute("data-value"));
+  const selectedValue = (popup: HTMLElement) =>
+    popup.querySelector('[cmdk-item][aria-selected="true"]')?.getAttribute("data-value") ?? null;
+  const listOf = (popup: HTMLElement) => popup.querySelector<HTMLElement>("[cmdk-list]")!;
+  /** The window's start, read back off the top spacer. */
+  const windowStart = (popup: HTMLElement) =>
+    Math.round(
+      Number.parseFloat(popup.querySelector<HTMLElement>('[data-testid="vcs-popup-spacer-top"]')!.style.height || "0") / ROW,
+    );
+
+  /** Give the list a viewport, and emulate the browser scrolling it into view. */
+  function installLayout(): () => void {
+    const height = ROW * VIEWPORT_ROWS;
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get: () => height });
+    // jsdom stores `scrollTop` only on an element it laid out, and it lays out
+    // nothing, so the offset is kept here instead.
+    let offset = 0;
+    Object.defineProperty(HTMLElement.prototype, "scrollTop", {
+      configurable: true,
+      get: () => offset,
+      set: (value: number) => {
+        offset = value;
+      },
+    });
+    const scrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function scrollIntoView(this: Element) {
+      const list = this.closest("[cmdk-list]");
+      if (!(list instanceof HTMLElement)) return;
+      const position = renderedItems(list).indexOf(this as HTMLElement);
+      if (position < 0) return;
+      // Where the row sits in the whole list, not just in the window.
+      const top = (windowStart(list) + position) * ROW;
+      let next = list.scrollTop;
+      if (top < next) next = top;
+      else if (top + ROW > next + list.clientHeight) next = top + ROW - list.clientHeight;
+      if (next === list.scrollTop) return;
+      list.scrollTop = next;
+      fireEvent.scroll(list);
+    };
+    return () => {
+      delete (HTMLElement.prototype as { clientHeight?: unknown }).clientHeight;
+      delete (HTMLElement.prototype as { scrollTop?: unknown }).scrollTop;
+      Element.prototype.scrollIntoView = scrollIntoView;
+    };
+  }
+
+  it("renders a window of rows rather than every branch", async () => {
+    const user = userEvent.setup();
+    const restoreLayout = installLayout();
+    try {
+      const slot = render({ overview: manyBranches(400) });
+      await user.click(slot.getByTestId("vcs-branch-button"));
+      const popup = await screen.findByTestId("vcs-branch-popup");
+      await waitFor(() => expect(within(popup).getByText("perf-0000")).toBeTruthy());
+      const items = renderedItems(popup);
+      // A viewport of ten rows plus the overscan either side, and no more. The
+      // exact count is the window's, not the repository's: this is the whole
+      // point of the change.
+      expect(items.length).toBeLessThanOrEqual(VIEWPORT_ROWS + POPUP_WINDOW_OVERSCAN * 2 + 2);
+      // A branch far down the list is genuinely not in the DOM.
+      expect(within(popup).queryByText("perf-0200")).toBeNull();
+      expect(items.length).toBeLessThan(50);
+    } finally {
+      restoreLayout();
+    }
+  });
+
+  it("still reaches a branch the window never rendered", async () => {
+    const user = userEvent.setup();
+    const restoreLayout = installLayout();
+    try {
+      const slot = render({ overview: manyBranches(400) });
+      await user.click(slot.getByTestId("vcs-branch-button"));
+      const popup = await screen.findByTestId("vcs-branch-popup");
+      await waitFor(() => expect(within(popup).getByText("perf-0000")).toBeTruthy());
+      const input = within(popup).getByLabelText("Search for branches and actions");
+      await user.type(input, "perf-0350");
+      // Windowing is not truncation: the row the reader asked for is there.
+      await waitFor(() => expect(within(popup).getByText("perf-0350")).toBeTruthy());
+      await user.click(within(popup).getByText("perf-0350"));
+      await waitFor(() =>
+        expect(slot.inspection.rpcCalls.at(-1)).toEqual({
+          method: "checkout",
+          input: { threadId: "t1", target: { kind: "local", name: "perf-0350" } },
+        }),
+      );
+    } finally {
+      restoreLayout();
+    }
+  });
+
+  it("moves the window with the scroll offset", async () => {
+    const user = userEvent.setup();
+    const restoreLayout = installLayout();
+    try {
+      const slot = render({ overview: manyBranches(400) });
+      await user.click(slot.getByTestId("vcs-branch-button"));
+      const popup = await screen.findByTestId("vcs-branch-popup");
+      await waitFor(() => expect(within(popup).getByText("perf-0000")).toBeTruthy());
+      expect(windowStart(popup)).toBe(0);
+
+      const list = listOf(popup);
+      list.scrollTop = 100 * ROW;
+      fireEvent.scroll(list);
+      await waitFor(() => expect(windowStart(popup)).toBeGreaterThan(50));
+      // The rows at the top are gone and the ones at the offset are here.
+      expect(within(popup).queryByText("perf-0000")).toBeNull();
+      expect(renderedNames(popup).some((value) => value?.includes("perf-01"))).toBe(true);
+    } finally {
+      restoreLayout();
+    }
+  });
+
+  it("walks the highlight down the whole list without stalling or jumping", async () => {
+    const user = userEvent.setup();
+    const restoreLayout = installLayout();
+    try {
+      const slot = render({ overview: manyBranches(400) });
+      await user.click(slot.getByTestId("vcs-branch-button"));
+      const popup = await screen.findByTestId("vcs-branch-popup");
+      await waitFor(() => expect(within(popup).getByText("perf-0000")).toBeTruthy());
+      const input = within(popup).getByLabelText("Search for branches and actions");
+
+      // cmdk highlights the first row it registers, so the popup opens on the
+      // first quick action and the first press moves to the second. That is
+      // how it behaved before the list was windowed.
+      await waitFor(() => expect(selectedValue(popup)).toBe("action:update"));
+      fireEvent.keyDown(input, { key: "ArrowDown" });
+      await waitFor(() => expect(selectedValue(popup)).toBe("action:commit"));
+
+      // Then forty more, which is well past the ten rows the viewport holds:
+      // the window has to follow the highlight for the walk to continue.
+      for (let press = 0; press < 40; press += 1) fireEvent.keyDown(input, { key: "ArrowDown" });
+
+      const selected = selectedValue(popup);
+      expect(selected).not.toBeNull();
+      // Forty-one presses from the first of seven quick actions reaches the
+      // thirty-fourth local branch, which is deep past the first window: not
+      // back at the top of it, which is where cmdk's own loop would put the
+      // highlight if the window did not follow.
+      expect(selected).toBe("local:local:perf-0033");
+      const names = renderedNames(popup);
+      expect(names).toContain(selected);
+      expect(windowStart(popup)).toBeGreaterThan(0);
+    } finally {
+      restoreLayout();
+    }
+  });
+
+  it("sends Home and End to the ends of the list, not the ends of the window", async () => {
+    const user = userEvent.setup();
+    const restoreLayout = installLayout();
+    try {
+      const slot = render({ overview: manyBranches(400) });
+      await user.click(slot.getByTestId("vcs-branch-button"));
+      const popup = await screen.findByTestId("vcs-branch-popup");
+      await waitFor(() => expect(within(popup).getByText("perf-0000")).toBeTruthy());
+      const input = within(popup).getByLabelText("Search for branches and actions");
+
+      fireEvent.keyDown(input, { key: "End" });
+      await waitFor(() => expect(selectedValue(popup)).toBe("local:local:perf-0399"));
+      // The last row of the list is the last row of the window.
+      expect(windowStart(popup)).toBeGreaterThan(300);
+
+      fireEvent.keyDown(input, { key: "Home" });
+      await waitFor(() => expect(selectedValue(popup)).toBe("action:update"));
+      expect(windowStart(popup)).toBe(0);
+    } finally {
+      restoreLayout();
+    }
+  });
+
+  it("stops the arrow at the last row instead of looping to the top of the window", async () => {
+    const user = userEvent.setup();
+    const restoreLayout = installLayout();
+    try {
+      const slot = render({ overview: manyBranches(400) });
+      await user.click(slot.getByTestId("vcs-branch-button"));
+      const popup = await screen.findByTestId("vcs-branch-popup");
+      await waitFor(() => expect(within(popup).getByText("perf-0000")).toBeTruthy());
+      const input = within(popup).getByLabelText("Search for branches and actions");
+
+      fireEvent.keyDown(input, { key: "End" });
+      await waitFor(() => expect(selectedValue(popup)).toBe("local:local:perf-0399"));
+      fireEvent.keyDown(input, { key: "ArrowDown" });
+      // cmdk would wrap here, and across a window that means the first row of
+      // the window rather than the first branch. It stays put instead.
+      expect(selectedValue(popup)).toBe("local:local:perf-0399");
+    } finally {
+      restoreLayout();
+    }
   });
 });
 
@@ -1115,14 +1378,14 @@ describe("CommitPanel", () => {
       const slot = renderCommitPanel();
       await slot.findAllByTestId(/^vcs-stream-row-/u);
       // The stream keeps one reader per concern, so the newest observer with
-      // each margin is the live one; the reader's is re-made as patches land.
+      // each margin is the live one.
       const newest = (rootMargin: string) =>
         [...IntersectionObserverStub.instances]
           .reverse()
           .find((instance) => instance.options?.rootMargin === rootMargin);
       const row = (element: HTMLElement) => ({ path: element.dataset.path, side: element.dataset.channel });
       // Start with everything on screen: both sides of both.txt read and render.
-      newest("200px 0px")!.report(() => true);
+      newest(PATCH_ROOT_MARGIN)!.report(() => true);
       newest("800px 0px")!.report(() => true);
       await slot.findByTestId("vcs-stream-patch-both.txt-index");
       await slot.findByTestId("vcs-stream-patch-both.txt-worktree");
@@ -1137,6 +1400,157 @@ describe("CommitPanel", () => {
     } finally {
       delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
     }
+  });
+
+  /**
+   * A wrapping diff is laid out as a grid whose columns span every row, so
+   * every width change makes the browser re-wrap the whole diff and re-solve
+   * that grid — measured at about 180ms a frame, against 0-1ms with scrolling
+   * lines. The library has no option for it, so the column is pinned to the
+   * width it had at rest while the pane is resized and released when the resize
+   * settles. These lock that, and lock that the scrolling case is left alone.
+   */
+  describe("the wrap pin", () => {
+    /** jsdom lays nothing out, so the stream is given a width the test controls. */
+    function installWidth(width: number): { set: (next: number) => void; restore: () => void } {
+      let current = width;
+      const bounds = Element.prototype.getBoundingClientRect;
+      Element.prototype.getBoundingClientRect = function getBoundingClientRect(this: Element) {
+        const isStream = (this as HTMLElement).dataset?.testid === "vcs-stream";
+        return {
+          x: 0, y: 0, top: 0, left: 0, bottom: 0, right: isStream ? current : 0,
+          width: isStream ? current : 0, height: 0, toJSON: () => ({}),
+        } as DOMRect;
+      };
+      return {
+        set: (next: number) => {
+          current = next;
+        },
+        restore: () => {
+          Element.prototype.getBoundingClientRect = bounds;
+        },
+      };
+    }
+
+    class ResizeObserverStub {
+      static readonly instances: ResizeObserverStub[] = [];
+      readonly elements = new Set<Element>();
+      constructor(private readonly callback: ResizeObserverCallback) {
+        ResizeObserverStub.instances.push(this);
+      }
+      observe(element: Element) {
+        this.elements.add(element);
+      }
+      unobserve(element: Element) {
+        this.elements.delete(element);
+      }
+      disconnect() {
+        this.elements.clear();
+      }
+      /** Report the container as having taken this width. */
+      report(width: number) {
+        const entries = [...this.elements].map((target) => ({
+          target,
+          contentRect: { width, height: 0, top: 0, left: 0, bottom: 0, right: width, x: 0, y: 0 },
+        })) as unknown as ResizeObserverEntry[];
+        act(() => this.callback(entries, this as unknown as ResizeObserver));
+      }
+    }
+
+    /**
+     * Swap in the stub for the duration of one test. The file installs its own
+     * `ResizeObserver` in `beforeAll`, so this restores that one rather than
+     * deleting the global and starving every test after this.
+     */
+    function installObserver(): () => void {
+      const previous = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+      ResizeObserverStub.instances.length = 0;
+      Object.assign(globalThis, { ResizeObserver: ResizeObserverStub });
+      return () => {
+        if (previous === undefined) delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+        else Object.assign(globalThis, { ResizeObserver: previous });
+      };
+    }
+
+    const wrapOn = () => window.localStorage.setItem("vcs-widget.diff-wrap.t1", "true");
+    const column = (slot: { getByTestId: (id: string) => HTMLElement }) => slot.getByTestId("vcs-stream-column");
+    const latest = () => [...ResizeObserverStub.instances].reverse()[0]!;
+
+    it("does not pin anything while long lines scroll", async () => {
+      const layout = installWidth(600);
+      const restoreObserver = installObserver();
+      try {
+        const slot = renderCommitPanel();
+        await slot.findAllByTestId(/^vcs-stream-row-/u);
+        latest().report(640);
+        // Nothing to save: a scrolling diff costs 0-1ms a width change, and its
+        // content follows the drag while it happens.
+        expect(column(slot).style.width).toBe("");
+      } finally {
+        layout.restore();
+        restoreObserver();
+      }
+    });
+
+    it("holds a wrapping diff's width while the pane is resized, and lets go when it settles", async () => {
+      wrapOn();
+      const layout = installWidth(600);
+      const restoreObserver = installObserver();
+      try {
+        const slot = renderCommitPanel();
+        await slot.findAllByTestId(/^vcs-stream-row-/u);
+        expect(column(slot).style.width).toBe("");
+
+        layout.set(640);
+        latest().report(640);
+        // Pinned to where it was, so the renderer has nothing to re-wrap.
+        expect(column(slot).style.width).toBe("600px");
+        expect(column(slot).style.minWidth).toBe("600px");
+
+        // Still pinned while the drag continues.
+        layout.set(580);
+        latest().report(580);
+        expect(column(slot).style.width).toBe("600px");
+
+        // Quiet for the settle window: one relayout, at the width it landed on.
+        // Waited out rather than advanced: the settle is a real timer, and
+        // `advanceClock` only moves `Date.now()`.
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, DIFF_WRAP_PIN_SETTLE_MS + 40));
+        });
+        expect(column(slot).style.width).toBe("");
+
+        // And a resize back to where it settled has nothing to pin for.
+        latest().report(580);
+        expect(column(slot).style.width).toBe("");
+      } finally {
+        layout.restore();
+        restoreObserver();
+      }
+    });
+
+    it("pins before the first width change when the panel's own splitter moves", async () => {
+      wrapOn();
+      const layout = installWidth(600);
+      const restoreObserver = installObserver();
+      try {
+        const slot = renderCommitPanel();
+        await slot.findAllByText("staged.txt");
+        const resizer = slot.getByTestId("vcs-file-list-resizer");
+
+        // A drag this panel started pins straight away: a resize the observer
+        // sees has already been laid out once, and that frame is the one the
+        // drag begins on.
+        fireEvent.pointerDown(resizer, { clientX: 1000 });
+        await waitFor(() => expect(column(slot).style.width).toBe("600px"));
+
+        fireEvent.pointerUp(window);
+        await waitFor(() => expect(column(slot).style.width).toBe(""));
+      } finally {
+        layout.restore();
+        restoreObserver();
+      }
+    });
   });
 
   it("commits the index with the message as a job and clears the message when it finishes", async () => {
@@ -1318,6 +1732,247 @@ describe("CommitPanel", () => {
     expect((await screen.findByTestId("vcs-command-preview")).textContent).toBe("git push --no-progress --end-of-options origin HEAD:refs/heads/main");
     await user.click(screen.getByText("Push", { selector: "button" }));
     await waitFor(() => expect(calls(slot, "push")).toEqual([{ threadId: "t1", remote: "origin", setUpstream: false, expectedBranch: "main", source: "head", expectedSha: "def5678", lease: null }]));
+  });
+
+  /**
+   * The file list used to render every row it had: a worktree with hundreds of
+   * changed files put hundreds of Radix-wrapped rows in the DOM and rebuilt all
+   * of them on every drag of the splitter. These are the properties that have to
+   * survive being windowed — the DOM stays bounded, a collapsed folder takes its
+   * files with it, the splitter writes once, and the diff reader asks for what
+   * is near the reader rather than for everything that is not.
+   *
+   * jsdom has no layout, so the list is given a viewport and a scroll offset the
+   * same way it is given `matchMedia` and `scrollIntoView`.
+   */
+  describe("windowed file list", () => {
+    const VIEWPORT_ROWS = 10;
+    const VIEWPORT_HEIGHT = CHANGE_LIST_ROW_HEIGHT * VIEWPORT_ROWS;
+
+    /** A working tree with more files than any list should render at once. */
+    function manyFiles(count: number): ChangesResult {
+      // `ChangesResult` is the ok branch or a failure; this fixture is the ok one.
+      const readable = CHANGES as Extract<ChangesResult, { ok: true }>;
+      return {
+        ...readable,
+        files: [
+          ...Array.from({ length: count }, (_, index) => ({
+            path: `bulk/file-${String(index).padStart(4, "0")}.txt`,
+            oldPath: null,
+            index: ".",
+            worktree: "M",
+            kind: "tracked" as const,
+            additions: 1,
+            deletions: 0,
+          })),
+          { path: "other/one.txt", oldPath: null, index: ".", worktree: "M", kind: "tracked" as const, additions: 1, deletions: 0 },
+        ],
+      };
+    }
+
+    /** Give every element a height and a scroll offset, which jsdom does not. */
+    function installLayout(): () => void {
+      let offset = 0;
+      Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get: () => VIEWPORT_HEIGHT });
+      Object.defineProperty(HTMLElement.prototype, "scrollTop", {
+        configurable: true,
+        get: () => offset,
+        set: (value: number) => {
+          offset = value;
+        },
+      });
+      const bounds = Element.prototype.getBoundingClientRect;
+      Element.prototype.getBoundingClientRect = function getBoundingClientRect(this: Element) {
+        const rect = bounds.call(this);
+        // The split's right edge, so the drag has something to measure against.
+        return { ...rect, right: 1000, left: 0, width: 1000, top: 0, bottom: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+      };
+      // jsdom has no PointerEvent, so `fireEvent.pointerMove` falls back to a
+      // plain Event and drops the coordinates a drag is made of. Only the drag
+      // tests need one, so it is installed here rather than for the file.
+      const pointerEvent = (globalThis as { PointerEvent?: unknown }).PointerEvent;
+      class PointerEventStub extends MouseEvent {}
+      Object.assign(globalThis, { PointerEvent: PointerEventStub });
+      return () => {
+        delete (HTMLElement.prototype as { clientHeight?: unknown }).clientHeight;
+        delete (HTMLElement.prototype as { scrollTop?: unknown }).scrollTop;
+        Element.prototype.getBoundingClientRect = bounds;
+        if (pointerEvent === undefined) delete (globalThis as { PointerEvent?: unknown }).PointerEvent;
+        else Object.assign(globalThis, { PointerEvent: pointerEvent });
+      };
+    }
+
+    const fileRows = (slot: { getByTestId: (id: string) => HTMLElement }) =>
+      Array.from(slot.getByTestId("vcs-file-list").querySelectorAll<HTMLElement>("li[data-path]"));
+    const listOf = (slot: { getByTestId: (id: string) => HTMLElement }) =>
+      slot.getByTestId("vcs-change-tree") as HTMLElement;
+    /** The window's start, read back off the top spacer. */
+    const windowStart = (slot: { getByTestId: (id: string) => HTMLElement }) =>
+      Math.round(
+        Number.parseFloat(listOf(slot).querySelector<HTMLElement>('[data-testid="vcs-change-list-spacer-top"]')!.style.height || "0") /
+          CHANGE_LIST_ROW_HEIGHT,
+      );
+
+    it("renders a window of file rows rather than every changed file", async () => {
+      const restore = installLayout();
+      try {
+        const slot = renderCommitPanel({ changes: manyFiles(400) });
+        await waitFor(() => expect(fileRows(slot).length).toBeGreaterThan(0));
+        const rendered = fileRows(slot);
+        // A viewport of ten rows plus the window's overscan either side.
+        expect(rendered.length).toBeLessThanOrEqual(VIEWPORT_ROWS + CHANGE_LIST_WINDOW_OVERSCAN * 2 + 2);
+        expect(rendered.length).toBeLessThan(50);
+        // A file far down the list is genuinely not in the DOM.
+        expect(slot.queryByText("file-0200.txt")).toBeNull();
+        expect(slot.queryByText("file-0000.txt")).toBeTruthy();
+      } finally {
+        restore();
+      }
+    });
+
+    it("moves the window with the list's own scroll offset", async () => {
+      const restore = installLayout();
+      try {
+        const slot = renderCommitPanel({ changes: manyFiles(400) });
+        await waitFor(() => expect(fileRows(slot).length).toBeGreaterThan(0));
+        expect(windowStart(slot)).toBe(0);
+
+        const list = listOf(slot);
+        list.scrollTop = 100 * CHANGE_LIST_ROW_HEIGHT;
+        fireEvent.scroll(list);
+        await waitFor(() => expect(windowStart(slot)).toBeGreaterThan(50));
+        // The window is showing the rows at the offset, not the ones at the top.
+        // The tree's root holds one directory row before the files.
+        expect(slot.queryByText("file-0000.txt")).toBeNull();
+        expect(fileRows(slot).length).toBeLessThan(50);
+      } finally {
+        restore();
+      }
+    });
+
+    it("takes a collapsed folder's files out of the list, and with them the window", async () => {
+      const user = userEvent.setup();
+      const restore = installLayout();
+      try {
+        const slot = renderCommitPanel({ changes: manyFiles(400) });
+        await waitFor(() => expect(slot.getByLabelText("Collapse bulk")).toBeTruthy());
+        expect(fileRows(slot).length).toBeGreaterThan(0);
+
+        await user.click(slot.getByLabelText("Collapse bulk"));
+        await waitFor(() => expect(slot.queryByText("file-0000.txt")).toBeNull());
+        // The folder keeps its own row, so it can be opened again.
+        expect(slot.getByLabelText("Collapse bulk")).toBeTruthy();
+        // Only the other directory's file is left to render.
+        expect(Array.from(fileRows(slot)).map((row) => row.dataset.path)).toEqual(["other/one.txt"]);
+      } finally {
+        restore();
+      }
+    });
+
+    it("writes the dragged width to the DOM as it moves, and to storage once", async () => {
+      const restore = installLayout();
+      try {
+        const slot = renderCommitPanel({ changes: CHANGES });
+        await slot.findAllByText("staged.txt");
+        // On the prototype: jsdom's `window.localStorage` is a proxy whose own
+        // properties a spy does not intercept.
+        const setItem = vi.spyOn(Storage.prototype, "setItem");
+        const widthKey = "vcs-widget.right-pane-width.t1";
+        const writesFor = () => setItem.mock.calls.filter((call) => call[0] === widthKey).length;
+        const before = writesFor();
+
+        const resizer = slot.getByTestId("vcs-file-list-resizer");
+        const pane = slot.getByTestId("vcs-file-list");
+        fireEvent.pointerDown(resizer, { clientX: 1000 });
+        // Three moves: the pane follows all of them, storage none of them. The
+        // write is put off to the next frame, so each one is waited for.
+        for (const clientX of [700, 600, 500]) {
+          fireEvent.pointerMove(window, { clientX });
+          await waitFor(() => expect(pane.style.width).toBe(`${1000 - clientX}px`));
+        }
+        expect(writesFor()).toBe(before);
+
+        fireEvent.pointerUp(window);
+        // One write for the whole drag, at the width it landed on.
+        expect(writesFor()).toBe(before + 1);
+        expect(pane.style.width).toBe("500px");
+      } finally {
+        restore();
+      }
+    });
+
+    it("clamps a drag that would collapse either pane", async () => {
+      const restore = installLayout();
+      try {
+        const slot = renderCommitPanel({ changes: CHANGES });
+        await slot.findAllByText("staged.txt");
+        const resizer = slot.getByTestId("vcs-file-list-resizer");
+        const pane = slot.getByTestId("vcs-file-list");
+        fireEvent.pointerDown(resizer, { clientX: 1000 });
+        fireEvent.pointerMove(window, { clientX: 1000 });
+        await waitFor(() => expect(pane.style.width).toBe(`${PANE_WIDTH.min}px`));
+        fireEvent.pointerMove(window, { clientX: 0 });
+        await waitFor(() => expect(pane.style.width).toBe(`${PANE_WIDTH.max}px`));
+        fireEvent.pointerUp(window);
+      } finally {
+        restore();
+      }
+    });
+
+    it("asks for the diffs near the reader, not for every row that is not", async () => {
+      class IntersectionObserverStub {
+        static readonly instances: IntersectionObserverStub[] = [];
+        readonly elements = new Set<Element>();
+        constructor(
+          private readonly callback: IntersectionObserverCallback,
+          readonly options?: IntersectionObserverInit,
+        ) {
+          IntersectionObserverStub.instances.push(this);
+        }
+        observe(element: Element) {
+          this.elements.add(element);
+        }
+        unobserve(element: Element) {
+          this.elements.delete(element);
+        }
+        disconnect() {
+          this.elements.clear();
+        }
+        takeRecords() {
+          return [];
+        }
+        report(near: (element: HTMLElement) => boolean) {
+          const entries = Array.from(this.elements).map((target) => {
+            const intersecting = near(target as HTMLElement);
+            return { target, isIntersecting: intersecting, intersectionRatio: intersecting ? 1 : 0 };
+          }) as IntersectionObserverEntry[];
+          act(() => this.callback(entries, this as unknown as IntersectionObserver));
+        }
+      }
+      Object.assign(globalThis, { IntersectionObserver: IntersectionObserverStub });
+      const restore = installLayout();
+      try {
+        const slot = renderCommitPanel({ changes: manyFiles(400) });
+        await slot.findAllByTestId(/^vcs-stream-row-/u);
+        const reader = IntersectionObserverStub.instances
+          .reverse()
+          .find((instance) => instance.options?.rootMargin === PATCH_ROOT_MARGIN)!;
+        // Three rows are near the reader; four hundred are not. The rows that
+        // are not used to be swept into the request as "overscan", so this is
+        // the difference between three paths and four hundred.
+        const near = new Set(["bulk/file-0000.txt", "bulk/file-0001.txt", "bulk/file-0002.txt"]);
+        reader.report((element) => near.has(element.dataset.path ?? ""));
+        await waitFor(() => expect(batchCalls(slot).length).toBeGreaterThan(0));
+        const asked = batchCalls(slot).flatMap((call) => call.paths);
+        expect(asked.length).toBeLessThanOrEqual(near.size);
+        expect(new Set(asked)).toEqual(near);
+        // And every call is still within the host's per-call cap.
+        for (const call of batchCalls(slot)) expect(call.paths.length).toBeLessThanOrEqual(50);
+      } finally {
+        restore();
+        delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
+      }
+    });
   });
 });
 

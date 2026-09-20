@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { UNMEASURED_ROWS, visibleRange } from "./virtual";
+import { UNMEASURED_ROWS, scrollTopForRow, visibleRange } from "./virtual";
 
 const range = (extra: Partial<Parameters<typeof visibleRange>[0]> = {}) =>
   visibleRange({ scrollTop: 0, viewportHeight: 200, rowHeight: 20, count: 1000, overscan: 2, ...extra });
@@ -37,5 +37,38 @@ describe("visibleRange", () => {
     expect(range({ count: 0 })).toEqual({ start: 0, end: 0, topPadding: 0, bottomPadding: 0 });
     expect(range({ scrollTop: -50 }).start).toBe(0);
     expect(range({ rowHeight: 0 })).toEqual({ start: 0, end: 1000, topPadding: 0, bottomPadding: 0 });
+  });
+});
+
+describe("scrollTopForRow", () => {
+  const at = (index: number, extra: Partial<Parameters<typeof scrollTopForRow>[0]> = {}) =>
+    scrollTopForRow({ index, rowHeight: 20, scrollTop: 0, viewportHeight: 200, ...extra });
+
+  it("leaves the offset alone when the row is already fully visible", () => {
+    // Rows 0..9 fill a 200px viewport; row 4 is on screen either way.
+    expect(at(4)).toBe(0);
+    expect(at(4, { scrollTop: 40 })).toBe(40);
+  });
+
+  it("scrolls up just far enough for a row above the viewport", () => {
+    expect(at(2, { scrollTop: 400 })).toBe(40);
+  });
+
+  it("scrolls down just far enough for a row below the viewport", () => {
+    // Row 12 ends at 260, so the viewport has to start at 60 to hold it.
+    expect(at(12, { scrollTop: 0 })).toBe(60);
+  });
+
+  it("puts the row at the top before the container has been measured", () => {
+    expect(at(7, { viewportHeight: 0, scrollTop: 500 })).toBe(140);
+  });
+
+  it("does nothing for a row that does not exist", () => {
+    expect(at(-1, { scrollTop: 33 })).toBe(33);
+    expect(at(3, { rowHeight: 0, scrollTop: 33 })).toBe(33);
+  });
+
+  it("never returns a negative offset", () => {
+    expect(at(0, { scrollTop: -100 })).toBe(0);
   });
 });

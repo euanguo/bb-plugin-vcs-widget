@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 (2026-09-20)
+
+One milestone, and it is about cost rather than capability: what the branch
+popup and the commit panel draw on a repository with hundreds of branches and
+hundreds of changed files, how many times one repository is read, and what a
+resize does to a wrapping diff. Nothing in it changes what the surfaces can do.
 
 - The commit panel's diff pane can be pointed at a revision instead of only at
   the working tree. A picker in the pane's own header offers the uncommitted

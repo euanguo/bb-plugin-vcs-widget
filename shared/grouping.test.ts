@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChangeEntry } from "../contracts";
-import { groupByDirectory, groupByStatus, groupChanges, isGroupingMode, sortGroupsByWeight } from "./grouping";
+import { flattenChangeGroups, groupByDirectory, groupByStatus, groupChanges, isGroupingMode, sortGroupsByWeight } from "./grouping";
 
 function entry(path: string, overrides: Partial<ChangeEntry> = {}): ChangeEntry {
   return { path, oldPath: null, index: ".", worktree: "M", kind: "tracked", additions: null, deletions: null, ...overrides };
@@ -105,5 +105,56 @@ describe("sortGroupsByWeight", () => {
     const before = groups.map((group) => group.key);
     sortGroupsByWeight(groups);
     expect(groups.map((group) => group.key)).toEqual(before);
+  });
+});
+
+describe("flattenChangeGroups", () => {
+  const entries = [
+    entry("src/a.txt"),
+    entry("src/b.txt"),
+    entry("new.txt", { worktree: "?", kind: "untracked" }),
+  ];
+
+  it("emits a header row and then its files", () => {
+    const labels = flattenChangeGroups(groupByStatus(entries)).map((row) => {
+      if (row.kind === "file") return `file:${row.label}`;
+      return row.kind === "group" ? `group:${row.title}` : `dir:${row.name}`;
+    });
+    expect(labels).toEqual([
+      "group:Changes",
+      "file:src/a.txt",
+      "file:src/b.txt",
+      "group:Unversioned files",
+      "file:new.txt",
+    ]);
+  });
+
+  it("labels a file by its whole path, since no directory row says where it is", () => {
+    const [header, first] = flattenChangeGroups(groupByStatus(entries));
+    expect(header?.kind).toBe("group");
+    expect(first?.kind).toBe("file");
+    if (first?.kind !== "file") return;
+    expect(first.label).toBe("src/a.txt");
+    expect(first.labelKind).toBe("path");
+    // No step-in: a flat list lines its files up with the header.
+    expect(first.depth).toBeNull();
+  });
+
+  it("carries each group's entries onto its header, for the stage-all and discard-all", () => {
+    const header = flattenChangeGroups(groupByStatus(entries))[0];
+    expect(header?.kind).toBe("group");
+    if (header?.kind !== "group") return;
+    expect(header.entries.map((item) => item.path)).toEqual(["src/a.txt", "src/b.txt"]);
+  });
+
+  it("gives the flat grouping one header and every file under it", () => {
+    const rows = flattenChangeGroups(groupChanges(entries, "flat"));
+    expect(rows).toHaveLength(entries.length + 1);
+    expect(rows[0]?.kind).toBe("group");
+    expect(rows.filter((row) => row.kind === "file")).toHaveLength(entries.length);
+  });
+
+  it("handles no groups at all", () => {
+    expect(flattenChangeGroups([])).toEqual([]);
   });
 });

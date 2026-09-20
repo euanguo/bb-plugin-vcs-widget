@@ -57,6 +57,38 @@ export const MAX_COMMIT_MESSAGE_BYTES = 64 * 1024;
 /** Changed files listed by the commit panel. */
 export const CHANGES_LIMIT = 500;
 
+/**
+ * Rows of the commit panel's changed-file list are a fixed height too, so the
+ * file list can be windowed the same way the log and the popup are. A
+ * directory header and a file row are both one line.
+ */
+export const CHANGE_LIST_ROW_HEIGHT = 22;
+
+/** Rows kept on either side of the file list's viewport. */
+export const CHANGE_LIST_WINDOW_OVERSCAN = 8;
+
+/**
+ * How wide the changed-file pane may be dragged. IntelliJ's own commit dialog
+ * has about this range, and the panel is a side tab rather than the window.
+ */
+export const PANE_WIDTH = { min: 220, max: 520 } as const;
+
+/**
+ * The branch popup's rows are a fixed height so the list can be windowed
+ * without measuring, the way the log's are. Every row — a group heading, a
+ * quick action or a branch — is pinned to exactly this, and the rows live
+ * directly in the list rather than inside cmdk groups, whose `p-1` fighting
+ * the arithmetic is what would make the scrollbar lie.
+ */
+export const POPUP_ROW_HEIGHT = 32;
+
+/**
+ * Rows kept on either side of the popup's viewport while scrolling. Smaller
+ * than the log's: a branch row is cheap to build but the whole point here is
+ * that only a screenful exists at a time.
+ */
+export const POPUP_WINDOW_OVERSCAN = 6;
+
 /** Commits per log page; the host reads one more to learn whether another page exists. */
 export const LOG_PAGE_SIZE = 100;
 /** How far "Load more" may walk with `--skip`. */
@@ -104,6 +136,35 @@ export const MIN_GIT_VERSION = { major: 2, minor: 24 } as const;
  * the continuous stream can never ask for more than a host call handles.
  */
 export const DIFF_PATCH_MAX_PATHS_PER_REQUEST = 50;
+
+/**
+ * How far past the viewport a diff card is read for. This margin *is* the
+ * read-ahead: everything the observer reports inside it is asked for, and
+ * nothing outside it is, so the set of paths one open can request is bounded
+ * by the viewport plus this band rather than by the size of the change set.
+ * Was 200px, which read barely past the fold; widening it here replaced the
+ * separate unbounded "overscan" list that used to carry the read-ahead.
+ */
+export const PATCH_ROOT_MARGIN = "600px 0px";
+
+/**
+ * How long a pane resize has to be quiet before the diff content is allowed to
+ * lay itself out again. A wrapping diff is laid out as a grid whose columns
+ * span every row, so each width change makes the browser re-wrap all of it and
+ * re-solve that grid — measured at about 180ms a frame, against 0-1ms with
+ * `overflow: scroll`. Pinning the content width for the length of a drag turns
+ * that into one relayout when the drag ends.
+ */
+export const DIFF_WRAP_PIN_SETTLE_MS = 160;
+
+/**
+ * How long a repository read stays good enough to paint from. Reopening the
+ * popup inside this window shows the overview already in hand instead of
+ * waiting on a host round trip; `changed` signals and a reconnect still force
+ * a read, so a lock or an external checkout is never more than a few seconds
+ * from being seen.
+ */
+export const OVERVIEW_FRESH_MS = 2_000;
 
 /**
  * Image extensions the panel previews instead of saying "Binary file.".

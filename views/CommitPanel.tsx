@@ -28,14 +28,14 @@ import {
   statusLetter,
   type FileMenuItemId,
 } from "../shared/model";
-import { groupChanges, isGroupingMode, sortGroupsByWeight, type GroupingMode } from "../shared/grouping";
+import { flattenChangeGroups, groupChanges, isGroupingMode, sortGroupsByWeight, type GroupingMode } from "../shared/grouping";
+import { paneWidthForPointer } from "../shared/pane-width";
 import { ConfirmStep } from "./ConfirmStep";
-import { ChangeTree, INDENT_BASE, INDENT_STEP } from "./ChangeTree";
-import { ChangeFileRow } from "./ChangeFileRow";
-import { FileStats } from "./FileStats";
+import { ChangeList } from "./ChangeList";
 import { statusLetterClass } from "./status-letter";
 import { DiffWrapToggle, useDiffWrap } from "./DiffWrapToggle";
 import { ContinuousDiffStream, streamRowKey, type DiffStreamEntry } from "./ContinuousDiffStream";
+import { buildChangeTree, flattenChangeTree, type ChangeListRow } from "../shared/file-tree";
 import { TargetPicker } from "./TargetPicker";
 import {
   baseCandidates,
@@ -84,127 +84,6 @@ function Empty({ children }: { children: string }) {
   return <p className="px-3 py-4 text-sm text-muted-foreground">{children}</p>;
 }
 
-interface RowProps {
-  entry: ChangeEntry;
-  selected: boolean;
-  /** A committed file: nothing to stage and nothing to discard. */
-  readOnly: boolean;
-  disabled: boolean;
-  pending: boolean;
-  onToggle: (entry: ChangeEntry) => void;
-  onSelect: (entry: ChangeEntry) => void;
-  onDiscard: (entry: ChangeEntry) => void;
-  onMenu: (itemId: FileMenuItemId, entry: ChangeEntry) => void;
-}
-
-/**
- * A row in the flat and by-status lists. The tree draws the same row through
- * the same component, so the two lists cannot drift apart again.
- */
-function Row({ entry, selected, readOnly, disabled, pending, onToggle, onSelect, onDiscard, onMenu }: RowProps) {
-  return (
-    <ChangeFileRow
-      entry={entry}
-      label={
-        entry.oldPath ? (
-          <>
-            <span className="text-muted-foreground">{entry.oldPath} → </span>
-            {entry.path}
-          </>
-        ) : (
-          entry.path
-        )
-      }
-      depth={null}
-      selected={selected}
-      readOnly={readOnly}
-      disabled={disabled}
-      pending={pending}
-      onToggle={onToggle}
-      onSelect={onSelect}
-      onDiscard={onDiscard}
-      onMenu={onMenu}
-    />
-  );
-}
-
-interface GroupProps {
-  title: string;
-  /** Directory depth, so a nested group indents its header. */
-  depth: number;
-  entries: ChangeEntry[];
-  selected: string | null;
-  /** Committed files: the header's tick and its discard-all are left out. */
-  readOnly: boolean;
-  disabled: boolean;
-  /** Paths with a stage/unstage in flight; only these rows grey out. */
-  pendingPaths: ReadonlySet<string>;
-  /** The header checkbox: stage all, or unstage all when everything is staged. */
-  onToggleAll: (entries: ChangeEntry[], stageThem: boolean) => void;
-  onToggle: (entry: ChangeEntry) => void;
-  onSelect: (entry: ChangeEntry) => void;
-  onDiscard: (entry: ChangeEntry) => void;
-  onMenu: (itemId: FileMenuItemId, entry: ChangeEntry) => void;
-  /** Header discard, VS Code's "Discard All Changes"; null where nothing can be discarded. */
-  onDiscardAll: ((entries: ChangeEntry[]) => void) | null;
-}
-
-function Group({ title, depth, entries, selected, readOnly, disabled, pendingPaths, onToggleAll, onToggle, onSelect, onDiscard, onMenu, onDiscardAll }: GroupProps) {
-  if (entries.length === 0) return null;
-  const allStaged = entries.every((entry) => stageState(entry) === "staged");
-  const noneStaged = entries.every((entry) => stageState(entry) === "unstaged");
-  const allUntracked = entries.every((entry) => entry.kind === "untracked");
-  return (
-    <section aria-label={title}>
-      <header
-        className="group/header flex items-center gap-2 py-1 pr-2 text-[11px] font-medium text-muted-foreground"
-        style={{ paddingLeft: `${INDENT_BASE + depth * INDENT_STEP}px` }}
-      >
-        <span>{title}</span>
-        <span className="tabular-nums">({entries.length})</span>
-        <span className="ml-auto flex items-center gap-2">
-          {readOnly || onDiscardAll === null ? null : (
-            <button
-              type="button"
-              aria-label={`Discard all changes in ${title}`}
-              title={allUntracked ? "Delete every file git does not track here" : "Revert every file here to HEAD"}
-              disabled={disabled}
-              className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 disabled:opacity-0 group-hover/header:opacity-100"
-              onClick={() => onDiscardAll(entries)}
-            >
-              <Icon name="RotateCcw" className="size-3.5" />
-            </button>
-          )}
-          {readOnly ? null : (
-            <Checkbox
-              checked={allStaged ? true : noneStaged ? false : "indeterminate"}
-              aria-label={allStaged ? `Unstage all in ${title}` : `Stage all in ${title}`}
-              disabled={disabled}
-              onCheckedChange={() => onToggleAll(entries, !allStaged)}
-            />
-          )}
-        </span>
-      </header>
-      <ul>
-        {entries.map((entry) => (
-          <Row
-            key={entry.path}
-            entry={entry}
-            selected={selected === entry.path}
-            readOnly={readOnly}
-            disabled={disabled}
-            pending={pendingPaths.has(entry.path)}
-            onToggle={onToggle}
-            onSelect={onSelect}
-            onDiscard={onDiscard}
-            onMenu={onMenu}
-          />
-        ))}
-      </ul>
-    </section>
-  );
-}
-
 export function CommitPanel({ threadId }: PanelProps) {
   const rpc = useRpc<typeof rpcContract>();
   const sidebar = useSidebarThread(threadId);
@@ -214,6 +93,15 @@ export function CommitPanel({ threadId }: PanelProps) {
   // Quiet: the status line under the buttons reports every outcome, and bb's
   // toasts would stack right over this form.
   const actions = useVcsActions({ threadId, overview, applyOverview, onCheckedOut: () => undefined, waitForJob: jobs.waitFor, quiet: true, applyStaged });
+  /**
+   * `useVcsActions` hands back a fresh object every render, so a handler that
+   * listed `actions` in its dependencies was itself rebuilt every render — and
+   * every memoized row it was given was re-rendered with it. The handlers below
+   * read the current actions through this ref instead, which is what lets them
+   * keep one identity for the life of the panel.
+   */
+  const actionsRef = useRef(actions);
+  actionsRef.current = actions;
 
   const [selected, setSelected] = useState<string | null>(null);
   // A file-list click scrolls the stream to that file rather than swapping
@@ -242,26 +130,56 @@ export function CommitPanel({ threadId }: PanelProps) {
   const [baseKey, setBaseKey] = usePersistedState<string>(`vcs-widget.diff-base.${threadId}`, "");
   const [wrap, setWrap] = useDiffWrap(threadId);
   const splitRef = useRef<HTMLDivElement | null>(null);
+  /** The file-list pane the splitter drags, written to directly during a drag. */
+  const paneRef = useRef<HTMLDivElement | null>(null);
   const prefilled = useRef<string | null>(null);
   const changesUpdatedAt = changes;
 
   const handleToggleTreePath = useCallback((path: string) => {
     setCollapsedTreePaths((current) => current.includes(path) ? current.filter((value) => value !== path) : [...current, path]);
   }, [setCollapsedTreePaths]);
+
+  /**
+   * The splitter drags the pane by its own width, in the DOM, and only tells
+   * React where it landed.
+   *
+   * Every pointermove used to go through `setRightPaneWidth`, which re-rendered
+   * the whole panel — the file list, the diff stream, the form — and wrote the
+   * preference to localStorage, once per pixel of travel. The pane's width is
+   * the one thing the drag changes, so the drag writes it directly, at most
+   * once a frame, and the state update that persists it happens once, on
+   * release. React's own `style={{ width }}` still holds at rest.
+   */
   useEffect(() => {
     if (!isResizing) return;
+    let frame = 0;
+    let pending: number | null = null;
     const handleMove = (event: PointerEvent) => {
       const bounds = splitRef.current?.getBoundingClientRect();
       if (bounds === undefined) return;
-      const next = Math.min(520, Math.max(220, bounds.right - event.clientX));
-      setRightPaneWidth(next);
+      pending = paneWidthForPointer(bounds.right, event.clientX);
+      if (frame !== 0) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        if (pending !== null && paneRef.current !== null) paneRef.current.style.width = `${pending}px`;
+      });
     };
-    const handleUp = () => setIsResizing(false);
+    const handleUp = () => {
+      if (frame !== 0) window.cancelAnimationFrame(frame);
+      frame = 0;
+      setIsResizing(false);
+      if (pending === null) return;
+      // Written through to the DOM first so the two agree even though React
+      // will render the same number back.
+      if (paneRef.current !== null) paneRef.current.style.width = `${pending}px`;
+      setRightPaneWidth(pending);
+    };
     window.addEventListener("pointermove", handleMove);
     window.addEventListener("pointerup", handleUp, { once: true });
     return () => {
       window.removeEventListener("pointermove", handleMove);
       window.removeEventListener("pointerup", handleUp);
+      if (frame !== 0) window.cancelAnimationFrame(frame);
     };
   }, [isResizing, setRightPaneWidth]);
   // What the working tree holds, whatever the diff pane is pointed at: the
@@ -274,6 +192,7 @@ export function CommitPanel({ threadId }: PanelProps) {
   }, [worktreeFiles, grouping, heaviestFirst]);
   const collapsedTreePathSet = useMemo(() => new Set(collapsedTreePaths), [collapsedTreePaths]);
   const stagedCount = worktreeFiles.filter(isStaged).length;
+
 
   // The diff pane's target. A range needs a base to be measured from, so the
   // stored one is used when it still parses and the repository's own idea of
@@ -293,6 +212,18 @@ export function CommitPanel({ threadId }: PanelProps) {
   }, [activeTarget, base]);
   const targetRead = useDiffTarget(threadId, diffTarget, changes);
   const files = diffTarget === null ? worktreeFiles : targetRead.files;
+
+  /**
+   * The file list as rows. The tree grouping is flattened to whichever rows are
+   * currently expanded and the other two groupings to a header and its files,
+   * so the list is one flat, equal-height sequence whichever grouping is on:
+   * that is what lets it be windowed.
+   */
+  const changeTree = useMemo(() => buildChangeTree(files), [files]);
+  const changeRows = useMemo(
+    () => (grouping === "directory" ? flattenChangeTree(changeTree, collapsedTreePathSet) : flattenChangeGroups(groups)),
+    [grouping, changeTree, collapsedTreePathSet, groups],
+  );
 
   // The commit list the picker offers, held with the base it describes.
   //
@@ -414,46 +345,37 @@ export function CommitPanel({ threadId }: PanelProps) {
           for (const path of paths) next.delete(path);
           return next;
         });
-      const run = target.kind === "conflicted" || state === "unstaged" ? actions.stage(paths) : actions.unstage(paths);
+      const run = target.kind === "conflicted" || state === "unstaged" ? actionsRef.current.stage(paths) : actionsRef.current.unstage(paths);
       void run.finally(clear);
     },
-    [actions],
+    [],
   );
-  const toggleAll = useCallback(
-    (entries: ChangeEntry[], stageThem: boolean) => {
-      const paths = entries
-        .filter((candidate) => (stageThem ? stageState(candidate) !== "staged" : stageState(candidate) !== "unstaged"))
-        .flatMap(pathsOf);
-      if (paths.length === 0) return;
-      setPendingPaths((current) => new Set([...current, ...paths]));
-      const clear = () =>
-        setPendingPaths((current) => {
-          const next = new Set(current);
-          for (const path of paths) next.delete(path);
-          return next;
-        });
-      const run = stageThem ? actions.stage(paths) : actions.unstage(paths);
-      void run.finally(clear);
-    },
-    [actions],
-  );
+  const toggleAll = useCallback((entries: ChangeEntry[], stageThem: boolean) => {
+    const paths = entries
+      .filter((candidate) => (stageThem ? stageState(candidate) !== "staged" : stageState(candidate) !== "unstaged"))
+      .flatMap(pathsOf);
+    if (paths.length === 0) return;
+    setPendingPaths((current) => new Set([...current, ...paths]));
+    const clear = () =>
+      setPendingPaths((current) => {
+        const next = new Set(current);
+        for (const path of paths) next.delete(path);
+        return next;
+      });
+    const run = stageThem ? actionsRef.current.stage(paths) : actionsRef.current.unstage(paths);
+    void run.finally(clear);
+  }, []);
 
-  const discardOne = useCallback(
-    (target: ChangeEntry) => {
-      setNotice(null);
-      actions.discard([target]);
-    },
-    [actions],
-  );
+  const discardOne = useCallback((target: ChangeEntry) => {
+    setNotice(null);
+    actionsRef.current.discard([target]);
+  }, []);
 
   /** VS Code's "Discard All Changes": one dialog, one call, the whole group. */
-  const discardAll = useCallback(
-    (entries: ChangeEntry[]) => {
-      setNotice(null);
-      actions.discard(entries);
-    },
-    [actions],
-  );
+  const discardAll = useCallback((entries: ChangeEntry[]) => {
+    setNotice(null);
+    actionsRef.current.discard(entries);
+  }, []);
 
   const onFileMenu = useCallback(
     (itemId: FileMenuItemId, target: ChangeEntry) => {
@@ -470,6 +392,12 @@ export function CommitPanel({ threadId }: PanelProps) {
     },
     [discardOne],
   );
+
+  /** A file-list click scrolls the diff stream to that file. */
+  const handleSelectFile = useCallback((entry: ChangeEntry) => {
+    setSelected(entry.path);
+    setScrollToPath(entry.path);
+  }, []);
 
   /**
    * Hands the commit to the agent in this thread. Always available: the human
@@ -621,6 +549,7 @@ export function CommitPanel({ threadId }: PanelProps) {
             wrap={wrap}
             filesUpdatedAt={changesUpdatedAt}
             isPanelOpen
+            resizing={isResizing}
             scrollToPath={scrollToPath}
             onScrolledToPath={() => setScrollToPath(null)}
             collapsed={collapsedRows}
@@ -651,6 +580,7 @@ export function CommitPanel({ threadId }: PanelProps) {
           <span aria-hidden className="absolute -left-1.5 top-0 h-full w-3" />
         </button>
         <div
+          ref={paneRef}
           className="flex min-h-0 min-w-0 shrink-0 flex-col overflow-x-hidden overflow-y-auto"
           style={{ width: rightPaneWidth }}
           aria-label="Changed files"
@@ -707,45 +637,26 @@ export function CommitPanel({ threadId }: PanelProps) {
                   {files.length}
                 </span>
               </div>
-              {grouping === "directory" ? (
-                <ChangeTree
-                  entries={files}
-                  selected={selected}
-                  readOnly={diffTarget !== null}
-                  collapsedPaths={collapsedTreePathSet}
-                  disabled={disabled}
-                  pendingPaths={pendingPaths}
-                  onToggleDirectory={handleToggleTreePath}
-                  onToggleAll={toggleAll}
-                  onToggleFile={toggle}
-                  onSelectFile={(next) => {
-                    setSelected(next.path);
-                    setScrollToPath(next.path);
-                  }}
-                  onDiscardFile={discardOne}
-                  onMenu={onFileMenu}
-                />
-              ) : groups.map((group) => (
-                <Group
-                  key={group.key}
-                  title={group.title}
-                  depth={group.depth}
-                  entries={group.entries}
-                  selected={selected}
-                  readOnly={diffTarget !== null}
-                  disabled={busy}
-                  pendingPaths={pendingPaths}
-                  onToggleAll={toggleAll}
-                  onToggle={toggle}
-                  onSelect={(next) => {
-                    setSelected(next.path);
-                    setScrollToPath(next.path);
-                  }}
-                  onDiscard={discardOne}
-                  onMenu={onFileMenu}
-                  onDiscardAll={group.entries.some((entry) => entry.kind === "conflicted") ? null : discardAll}
-                />
-              ))}
+              {/*
+                One list for every grouping: the tree is flattened to the rows
+                that are currently visible, and so are the status buckets, so
+                the window can be arithmetic over a single row height.
+              */}
+              <ChangeList
+                rows={changeRows}
+                selected={selected}
+                readOnly={diffTarget !== null}
+                disabled={disabled}
+                busy={busy}
+                pendingPaths={pendingPaths}
+                onToggleDirectory={handleToggleTreePath}
+                onToggleAll={toggleAll}
+                onToggleFile={toggle}
+                onSelectFile={handleSelectFile}
+                onDiscardFile={discardOne}
+                onDiscardAll={discardAll}
+                onMenu={onFileMenu}
+              />
               {diffTarget === null && changes.truncated ? <p className="px-2 py-1 text-xs text-muted-foreground">Only the first {files.length} files are listed.</p> : null}
               {targetRead.truncated ? <p className="px-2 py-1 text-xs text-muted-foreground">Only the first {files.length} files are listed.</p> : null}
             </>

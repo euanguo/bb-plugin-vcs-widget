@@ -50,6 +50,38 @@
   It reads the repository without being asked, which the popup never did: it
   has to know whether there is anything to commit before it can decide to
   show. A thread bb has no environment for is not read.
+- The branch popup and the commit panel's changed-file list draw only what is on
+  screen. Against a thread whose worktree holds 210 local and 200 remote
+  branches, the popup rendered 425 rows, took 820 ms of main-thread work to open
+  and cost 66-192 ms a keystroke in its search box; the changed-file list
+  rendered all 502 rows of a 459-file change set, and the panel around them
+  carried 11 346 nodes. Both are windowed now, over a fixed row height, the way
+  the log already was: 24 rows and no measurable work to open, 2-18 ms a
+  keystroke, 32 rows for the file list. A window is arithmetic over equal-height
+  rows, so the popup's rows are one flat list -- group headings included rather
+  than cmdk groups, whose padding fights the arithmetic -- and the keyboard walk
+  is still cmdk's own: `aria-activedescendant` moves with it, and the row the
+  walk lands on is scrolled into view in the same update that selects it, so no
+  paint shows a highlight that is not mounted.
+- One repository is read once at a time. The strip above the message box reads
+  it without being asked, the popup reads it when it opens and a panel reads it
+  when it mounts, and those three used to be three identical reads of six git
+  processes each; a read already in flight for a repository is now the answer to
+  the next ask. The client keeps the last overview per environment for two
+  seconds as well, so reopening the popup inside that window paints from what is
+  in hand instead of round-tripping. The `changed` signal, a reconnect, a retry
+  and the panel's refresh button still read unconditionally -- the window is for
+  the case where nothing has had time to move.
+- A resize no longer re-wraps the whole diff. With `overflow: wrap` the renderer
+  lays the diff out as a grid whose two columns each span every row, so every
+  width change made the browser re-wrap all of it and re-solve that grid:
+  180 ms a frame against 0-1 ms with scrolling lines, 59 of 60 frames over
+  33 ms, and 33 s of long tasks across sixty width changes. The stream now pins
+  the content's width for the length of a resize and releases it when the resize
+  settles, so the content re-lays-out once at the end -- 17 ms a frame, one
+  frame over 33 ms, 431 ms of long tasks. It applies only in wrap mode. The
+  splitter also writes its width to storage once when the drag ends rather than
+  once per pointermove.
 
 ## 0.7.0 (2026-09-10)
 

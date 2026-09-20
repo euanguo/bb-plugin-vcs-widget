@@ -30,6 +30,7 @@ import {
 } from "./shared/constants";
 import { hintFor } from "./shared/git-errors";
 import { createAfterMutation } from "./server/after-mutation";
+import { createCoalescer } from "./server/overview-coalesce";
 import { CLI_COMMANDS, CLI_NAME, CLI_SUMMARY, parseCli, runCli, runCommand, type CliReader } from "./server/cli";
 import { RepositoryUnavailableError, repositoryForThread, type RepositoryTarget } from "./server/repo-target";
 
@@ -118,6 +119,13 @@ export default async function plugin(bb: BbPluginApi) {
   // the client here is fine.
   const host = bb.hosts.experimental_client({ contract: hostContract, experimental_signals: hostSignals });
   const changes = createAfterMutation(bb);
+  /**
+   * One repository read at a time, per repository. The banner reads without
+   * being asked, the popup reads when it opens and a panel reads when it
+   * mounts, and against one repository that used to be three identical
+   * reads of six git processes each.
+   */
+  const coalesceOverview = createCoalescer<string, Overview>();
 
   // Which environments a host repository serves, learned from overviews, so
   // a watch or job signal (which only knows the repository) reaches the
@@ -299,10 +307,8 @@ export default async function plugin(bb: BbPluginApi) {
     async overview({ threadId }) {
       const target = await resolveTarget(threadId);
       if ("unavailable" in target) return unavailableOverview(target.unavailable.message, target.unavailable.kind);
-      const overview = await host.call(
-        "overview",
-        { repoPath: target.repoPath, recentLimit: RECENT_LIMIT },
-        { hostId: target.hostId },
+      const overview = await coalesceOverview(repoKey(target.hostId, target.repoPath), () =>
+        host.call("overview", { repoPath: target.repoPath, recentLimit: RECENT_LIMIT }, { hostId: target.hostId }),
       );
       remember(target, overview);
       return overview;
@@ -590,10 +596,8 @@ export default async function plugin(bb: BbPluginApi) {
     async overview(threadId) {
       const target = await resolveTarget(threadId);
       if ("unavailable" in target) return unavailableOverview(target.unavailable.message, target.unavailable.kind);
-      const result = await host.call(
-        "overview",
-        { repoPath: target.repoPath, recentLimit: RECENT_LIMIT },
-        { hostId: target.hostId },
+      const result = await coalesceOverview(repoKey(target.hostId, target.repoPath), () =>
+        host.call("overview", { repoPath: target.repoPath, recentLimit: RECENT_LIMIT }, { hostId: target.hostId }),
       );
       remember(target, result);
       return result;

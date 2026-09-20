@@ -2,28 +2,26 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import { toast } from "sonner";
 import type { LocalBranch, Overview, TagList } from "../contracts";
 import type { JobProgress } from "../hooks/use-jobs";
+import { usePopupList } from "../hooks/use-popup-list";
 import type { ActionStatus } from "../hooks/use-vcs-actions";
 import {
-  FAVOURITE_BONUS,
   blockingReason,
-  entryKey,
-  filterAndRank,
   groupBranches,
   quickActionsFor,
   type BranchEntry,
   type BranchMenuItemId,
   type QuickActionId,
 } from "../shared/model";
-import { BranchRow, type MenuExtra } from "./BranchRow";
+import { buildPopupRows, popupSource } from "../shared/popup-rows";
+import { BranchListRows } from "./BranchList";
+import type { MenuExtra } from "./BranchRow";
 import { NewBranchStep } from "./NewBranchStep";
-import { QuickActions } from "./QuickActions";
 import { RenameStep } from "./RenameStep";
 import { RevisionStep } from "./RevisionStep";
 import { StatusLine } from "./StatusLine";
 import {
   Command,
   CommandEmpty,
-  CommandGroup,
   CommandInput,
   CommandList,
 } from "@/components/ui/command";
@@ -85,7 +83,6 @@ export function BranchPopup({
   const [query, setQuery] = useState("");
   const [step, setStep] = useState<Step>({ kind: "list" });
   const inputRef = useRef<HTMLInputElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
 
   // The popup stays mounted while closed; a reopen starts from a clean list.
   useEffect(() => {
@@ -96,21 +93,25 @@ export function BranchPopup({
   }, [open]);
 
   const groups = useMemo(() => (overview ? groupBranches(overview, favourites) : null), [overview, favourites]);
-  const bonus = useCallback(
-    (kind: "local" | "remote") => (item: { name: string }) => (favourites.has(`${kind}:${item.name}`) ? FAVOURITE_BONUS : 0),
-    [favourites],
-  );
-  const favouriteRows = useMemo(() => {
-    if (!groups) return [];
-    const named = groups.favourites.map((entry) => ({ name: entry.branch.name, entry }));
-    return filterAndRank(named, query).map((row) => row.entry);
-  }, [groups, query]);
-  const recent = useMemo(() => (groups ? filterAndRank(groups.recent, query, bonus("local")) : []), [groups, query, bonus]);
-  const local = useMemo(() => (groups ? filterAndRank(groups.local, query, bonus("local")) : []), [groups, query, bonus]);
-  const remote = useMemo(() => (groups ? filterAndRank(groups.remote, query, bonus("remote")) : []), [groups, query, bonus]);
+  // Two steps on purpose: `popupSource` makes the `BranchEntry` objects once
+  // per repository read, and `buildPopupRows` filters and ranks them once per
+  // keystroke. Typing therefore hands every surviving row the same entry it
+  // had, which is what lets its memo hold.
+  const source = useMemo(() => popupSource(overview, groups), [overview, groups]);
+  const rows = useMemo(() => buildPopupRows(source, query, favourites), [source, query, favourites]);
+  const list = usePopupList(rows, query);
   const unavailable = overview?.unavailableReason ?? null;
+  const rowDisabled = busy || unavailable !== null;
 
-  const runQuickAction = (id: QuickActionId) => {
+  // Every handler a row is given has to keep its identity across renders, or
+  // the row's memo is worthless and the list re-renders whole on each
+  // keystroke. They read the latest props through a ref — the pattern the
+  // continuous diff stream uses for the same reason — so a row built once
+  // stays built.
+  const latest = useRef({ overview, busy, unavailable, onCheckout, onQuickAction, onMenu, onToggleFavourite, rowDisabled });
+  latest.current = { overview, busy, unavailable, onCheckout, onQuickAction, onMenu, onToggleFavourite, rowDisabled };
+
+  const runQuickAction = useCallback((id: QuickActionId) => {
     if (id === "new-branch") {
       setStep({ kind: "new-branch", from: null });
       return;
@@ -119,8 +120,8 @@ export function BranchPopup({
       setStep({ kind: "revision" });
       return;
     }
-    onQuickAction(id);
-  };
+    latest.current.onQuickAction(id);
+  }, []);
 
   // A palette request obeys the same guards as a click on the row.
   useEffect(() => {
@@ -135,10 +136,10 @@ export function BranchPopup({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- run once per request
   }, [pendingAction, overview]);
 
-  const handleMenu = (itemId: BranchMenuItemId, entry: BranchEntry, extra?: MenuExtra) => {
+  const handleMenu = useCallback((itemId: BranchMenuItemId, entry: BranchEntry, extra?: MenuExtra) => {
     switch (itemId) {
       case "checkout":
-        onCheckout(entry);
+        latest.current.onCheckout(entry);
         return;
       case "new-branch-from":
         setStep({ kind: "new-branch", from: entry.branch.name });
@@ -147,7 +148,7 @@ export function BranchPopup({
         if (entry.kind === "local") setStep({ kind: "rename", branch: entry.branch });
         return;
       case "favourite":
-        onToggleFavourite(entry);
+        latest.current.onToggleFavourite(entry);
         return;
       case "copy-name":
         void navigator.clipboard?.writeText(entry.branch.name).then(
@@ -156,47 +157,35 @@ export function BranchPopup({
         );
         return;
       default:
-        onMenu(itemId, entry, extra);
+        latest.current.onMenu(itemId, entry, extra);
     }
-  };
+  }, []);
 
   // F2 renames the highlighted local branch, as in IntelliJ.
   const onListKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "F2" || overview === null) return;
-    const selected = listRef.current?.querySelector('[cmdk-item][data-selected="true"][data-branch-kind="local"]');
+    const view = latest.current.overview;
+    if (event.key !== "F2" || view === null) return;
+    const selected = list.listElement?.querySelector('[cmdk-item][data-selected="true"][data-branch-kind="local"]');
     const name = selected?.getAttribute("data-branch-name");
-    const branch = name ? overview.local.find((candidate) => candidate.name === name) : undefined;
+    const branch = name ? view.local.find((candidate) => candidate.name === name) : undefined;
     if (branch === undefined) return;
     event.preventDefault();
     setStep({ kind: "rename", branch });
   };
 
-  const rowDisabled = busy || unavailable !== null;
   const back = () => setStep({ kind: "list" });
   // A disabled cmdk row loses its context menu (pointer-events), so a row
   // stays clickable while an operation or job blocks the repository and
   // Enter/click explain instead of running.
-  const selectRow = (entry: BranchEntry) => {
-    const reason = overview === null ? null : blockingReason(overview);
+  const selectRow = useCallback((entry: BranchEntry) => {
+    const view = latest.current.overview;
+    const reason = view === null ? null : blockingReason(view);
     if (reason !== null) {
       toast.error(reason);
       return;
     }
-    onCheckout(entry);
-  };
-
-  const row = (entry: BranchEntry, prefix: string) => (
-    <BranchRow
-      key={`${prefix}:${entryKey(entry)}`}
-      value={`${prefix}:${entryKey(entry)}`}
-      entry={entry}
-      overview={overview!}
-      disabled={rowDisabled}
-      favourite={favourites.has(entryKey(entry))}
-      onSelect={selectRow}
-      onMenu={handleMenu}
-    />
-  );
+    latest.current.onCheckout(entry);
+  }, []);
 
   return (
     <PopoverContent
@@ -246,7 +235,18 @@ export function BranchPopup({
           }}
         />
       ) : (
-        <Command shouldFilter={false} loop className="rounded-md" onKeyDown={onListKeyDown}>
+        // cmdk's own handler runs after this one and skips itself whenever the
+        // event was default-prevented, which is how the window keeps the two
+        // keys it has to correct without taking the keyboard over.
+        <Command
+          shouldFilter={false}
+          loop
+          className="rounded-md"
+          onKeyDown={(event) => {
+            list.onKeyDown(event);
+            onListKeyDown(event);
+          }}
+        >
           <CommandInput
             ref={inputRef}
             placeholder="Search for branches and actions"
@@ -254,7 +254,7 @@ export function BranchPopup({
             value={query}
             onValueChange={setQuery}
           />
-          <CommandList ref={listRef} className="max-h-[min(60vh,28rem)]">
+          <CommandList ref={list.listRef} onScroll={list.onScroll} className="max-h-[min(60vh,28rem)]">
             {unavailable !== null ? (
               <p className="px-3 py-6 text-center text-sm text-muted-foreground">{unavailable}</p>
             ) : (
@@ -262,28 +262,17 @@ export function BranchPopup({
                 <CommandEmpty>
                   {overview === null ? "Reading repository…" : `Nothing matches “${query}”.`}
                 </CommandEmpty>
-                <QuickActions overview={overview} query={query} busy={busy} onAction={runQuickAction} />
-                {overview && groups ? (
-                  <>
-                    {favouriteRows.length > 0 ? (
-                      <CommandGroup heading="Favourites">{favouriteRows.map((entry) => row(entry, "fav"))}</CommandGroup>
-                    ) : null}
-                    {recent.length > 0 ? (
-                      <CommandGroup heading="Recent">
-                        {recent.map((branch) => row({ kind: "local", branch }, "recent"))}
-                      </CommandGroup>
-                    ) : null}
-                    {local.length > 0 ? (
-                      <CommandGroup heading={overview.truncated.local ? "Local (truncated)" : "Local"}>
-                        {local.map((branch) => row({ kind: "local", branch }, "local"))}
-                      </CommandGroup>
-                    ) : null}
-                    {remote.length > 0 ? (
-                      <CommandGroup heading={overview.truncated.remote ? "Remote (truncated)" : "Remote"}>
-                        {remote.map((branch) => row({ kind: "remote", branch }, "remote"))}
-                      </CommandGroup>
-                    ) : null}
-                  </>
+                {overview !== null ? (
+                  <BranchListRows
+                    rows={rows}
+                    window={list.window}
+                    overview={overview}
+                    disabled={rowDisabled}
+                    favourites={favourites}
+                    onSelect={selectRow}
+                    onMenu={handleMenu}
+                    onAction={runQuickAction}
+                  />
                 ) : null}
               </>
             )}

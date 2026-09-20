@@ -79,6 +79,15 @@ app.tsx (browser) --useRpc(rpcContract, keyed by threadId)--> server.ts (bb serv
   the log panel's reads in `host/log.ts`, with cherry-pick, revert and reset
   among the ordinary mutations in `host/actions.ts`. Patch caps, the binary
   check and the both-sides read they share are in `host/diff-text.ts`.
+- `overview` is coalesced per repository
+  (`server/overview-coalesce.ts`, in-flight only, no TTL): the banner reads
+  without being asked, the popup reads when it opens and a panel reads when it
+  mounts, and those three used to be three identical reads of six git
+  processes each. The client keeps the last overview per environment for
+  `OVERVIEW_FRESH_MS` (`shared/overview-cache.ts`) so reopening the popup
+  inside that window paints instead of round-tripping; `refetch` stays
+  unconditional for the `changed` signal, a reconnect, a retry and the panel's
+  refresh button, and only `refreshIfStale` respects the window.
 - `server.ts` resolves thread to environment, forwards to the host, then nudges
   `bb.sdk.environments.status` (0 s and 3.2 s) and publishes `changed`. It
   maps `hostId + repoRoot` to environment ids (from overviews) to route
@@ -117,7 +126,23 @@ app.tsx (browser) --useRpc(rpcContract, keyed by threadId)--> server.ts (bb serv
   awaited in `hooks/use-jobs.ts` (realtime `job` channel, `jobGet` polling
   fallback); a confirmed action closes the popup and reports by toast. The
   log list is windowed by `shared/virtual.ts` (fixed row height, two
-  spacers), not by a dependency. `components/ui/context-menu.tsx` ignores
+  spacers), not by a dependency, and so are the branch popup and the commit
+  panel's changed-file list. The popup's rows are one flat list
+  (`shared/popup-rows.ts` builds them, group headings included) because a
+  window is arithmetic over equal-height rows; `hooks/use-popup-list.ts` owns
+  the slice and the two places where "what cmdk can see" and "what the list
+  holds" disagree — it keeps cmdk's own keyboard and its
+  `aria-activedescendant` rather than driving the `value` prop, which would
+  move the highlight without updating the store's `selectedItemId`. The file
+  list is flattened the same way (`flattenChangeTree` / `flattenChangeGroups`)
+  and `views/ChangeList.tsx` windows it. A wrapping diff is the one thing that
+  does not follow a resize cheaply: `overflow: wrap` makes the renderer lay the
+  diff out as a grid whose columns span every row, so each width change
+  re-wraps all of it (~180ms a frame against 0-1ms scrolling, and the library
+  offers no option for it), so `ContinuousDiffStream` pins its column to the
+  width it had at rest for the length of a resize and releases it when the
+  resize settles — driven by the panel's own `resizing` flag when ours started
+  it, and by its own ResizeObserver for a resize we did not. `components/ui/context-menu.tsx` ignores
   the pointerup that opened a menu: Radix clicks an item it saw no
   pointerdown on, so a menu shifted over the pointer would run that row.
 - Pure, DOM-free logic in `shared/` with fixture tests. `shared/constants.ts`
@@ -141,9 +166,16 @@ Live click-through: `docs/VERIFY.md`, driven by `scripts/live-check.mjs`
 `scripts/live-check-m4.mjs` (M4), `scripts/live-check-m5.mjs` (M5: the
 CLI, the settings sections, a 390 px pass), `scripts/live-check-m6.mjs`
 (the commit panel's file menu, group discard and LGTM - Commit, which sends
-a real message to the thread) and `scripts/live-check-m7.mjs` (the composer
+a real message to the thread), `scripts/live-check-m7.mjs` (the composer
 banner appearing on the watch, its count and its buttons; it never clicks
-them, because this banner only exists over a dirty tree) on
+them, because this banner only exists over a dirty tree) and
+`scripts/live-check-m8.mjs` (what the popup and the changed-file list cost on
+a repository with hundreds of branches and hundreds of changed files: rows
+rendered, long tasks, keystroke latency, the keyboard walk, a splitter drag
+and the storage writes it makes. It makes its own fixture unless given
+`--read-only`, and it drives the splitter with pointer events dispatched
+inside the page — a driven mouse costs about a second a frame here on its own
+and once produced a confident, wrong answer) on
 `scripts/live-lib.mjs` (system
 Chromium + puppeteer-core against `$BB_SERVER_URL`; fixture content must be
 unique per run, the scratch repo is reused). `scripts/screenshots.mjs`

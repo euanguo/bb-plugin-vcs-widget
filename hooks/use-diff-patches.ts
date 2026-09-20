@@ -47,8 +47,8 @@ const IDLE: DiffPatchState = { status: "idle" };
 const REQUEST_DEBOUNCE_MS = 80;
 
 export interface UseDiffPatchesResult {
-  /** Tell the hook which paths are visible and which are merely nearby. */
-  requestPaths: (paths: { visible: string[]; overscan: string[] }) => void;
+  /** The paths the stream is showing or about to show, nearest the reader first. */
+  requestPaths: (paths: readonly string[]) => void;
   /** What the stream renders for one path. */
   getPatchState: (path: string) => DiffPatchState;
   /** Fetch one path now, bypassing the debounce (the "Load diff" button). */
@@ -74,7 +74,7 @@ export function useDiffPatches(
   // or a different side of it, so nothing stored here is meaningful any more.
   const identity = request === null ? `${threadId}:none` : `${threadId}:${patchRequestKey(request)}`;
   const identityRef = useRef(identity);
-  const pendingRef = useRef<{ visible: string[]; overscan: string[] }>({ visible: [], overscan: [] });
+  const pendingRef = useRef<readonly string[]>([]);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inFlightRef = useRef<Set<string>>(new Set());
   const controllersRef = useRef<Set<AbortController>>(new Set());
@@ -208,7 +208,7 @@ export function useDiffPatches(
     const requestedUnder = identityRef.current;
     const seen = new Set<string>();
     const ordered: string[] = [];
-    for (const path of [...pendingRef.current.visible, ...pendingRef.current.overscan]) {
+    for (const path of pendingRef.current) {
       if (seen.has(path)) continue;
       seen.add(path);
       ordered.push(path);
@@ -226,7 +226,7 @@ export function useDiffPatches(
   }, [enabled, fetchPaths]);
 
   const requestPaths = useCallback(
-    (paths: { visible: string[]; overscan: string[] }) => {
+    (paths: readonly string[]) => {
       pendingRef.current = paths;
       if (timerRef.current !== null) clearTimeout(timerRef.current);
       timerRef.current = setTimeout(dispatchPending, REQUEST_DEBOUNCE_MS);

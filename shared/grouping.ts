@@ -3,6 +3,7 @@
 // answers the case that motivated this: sixty changed files in one flat list
 // tell a reader nothing about where the work is.
 import type { ChangeEntry } from "../contracts";
+import type { ChangeListRow } from "./file-tree";
 
 export const GROUPING_MODES = ["status", "directory", "flat"] as const;
 export type GroupingMode = (typeof GROUPING_MODES)[number];
@@ -113,4 +114,22 @@ export function sortGroupsByWeight(groups: readonly ChangeGroup[]): ChangeGroup[
     if (b.entries.length !== a.entries.length) return b.entries.length - a.entries.length;
     return a.key.localeCompare(b.key);
   });
+}
+
+/**
+ * The groups as the rows the list draws: a header, then its files.
+ *
+ * These modes have no directory rows to say where a file lives, so a file row
+ * is labelled by its whole path and steps in not at all — which is what the
+ * list did when it nested them, and what `flattenChangeTree` does not do.
+ */
+export function flattenChangeGroups(groups: readonly ChangeGroup[]): ChangeListRow[] {
+  const rows: ChangeListRow[] = [];
+  for (const group of groups) {
+    rows.push({ kind: "group", key: group.key, depth: group.depth, title: group.title, entries: group.entries });
+    for (const entry of group.entries) {
+      rows.push({ kind: "file", key: entry.path, entry, depth: null, label: entry.path, labelKind: "path" });
+    }
+  }
+  return rows;
 }

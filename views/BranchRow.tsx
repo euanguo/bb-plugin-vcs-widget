@@ -1,6 +1,7 @@
-import { Fragment, type MouseEvent } from "react";
+import { Fragment, memo, useMemo, useState, type MouseEvent } from "react";
 import type { LocalBranch, Overview } from "../contracts";
 import { entryKey, menuFor, type BranchEntry, type BranchMenuItemId, type TrackedOption } from "../shared/model";
+import { POPUP_ROW_HEIGHT } from "../shared/constants";
 import { CommandItem } from "@/components/ui/command";
 import {
   ContextMenu,
@@ -51,18 +52,35 @@ function openMenuAt(event: MouseEvent<HTMLButtonElement>) {
   );
 }
 
-export function BranchRow({ entry, overview, value, disabled, favourite, onSelect, onMenu }: BranchRowProps) {
-  const items = menuFor(entry, overview, { favourite });
+/**
+ * One branch.
+ *
+ * Memoized, and deliberately: the popup hands a row the same entry object
+ * across a keystroke, so a row that survives a filter change is not rebuilt.
+ * Everything it is given has to keep its identity for that to hold, which is
+ * why the popup builds its handlers once.
+ */
+export const BranchRow = memo(function BranchRow({ entry, overview, value, disabled, favourite, onSelect, onMenu }: BranchRowProps) {
+  const [open, setOpen] = useState(false);
+  // Built when the menu opens rather than when the row renders. A local row's
+  // menu is seventeen items plus a sorted list of every remote branch, and in
+  // a repository with hundreds of branches that was the whole cost of a
+  // keystroke — it was paid for every row, for a menu nobody had asked for.
+  const items = useMemo(
+    () => (open ? menuFor(entry, overview, { favourite }) : null),
+    [open, entry, overview, favourite],
+  );
   const isCurrent = entry.kind === "local" && entry.branch.isCurrent;
   const name = entry.branch.name;
   return (
-    <ContextMenu>
+    <ContextMenu onOpenChange={setOpen}>
       <ContextMenuTrigger asChild>
         <CommandItem
           value={value}
           disabled={disabled}
           onSelect={() => onSelect(entry)}
           className="group gap-2 pr-1"
+          style={{ height: POPUP_ROW_HEIGHT }}
           data-branch-kind={entry.kind}
           data-branch-name={name}
           data-favourite={favourite ? "true" : undefined}
@@ -106,7 +124,7 @@ export function BranchRow({ entry, overview, value, disabled, favourite, onSelec
         </CommandItem>
       </ContextMenuTrigger>
       <ContextMenuContent className="min-w-64" data-testid="vcs-branch-menu" data-branch-key={entryKey(entry)}>
-        {items.map((item) => (
+        {(items ?? []).map((item) => (
           <Fragment key={item.id}>
             {item.separatorBefore ? <ContextMenuSeparator /> : null}
             {item.id === "tracked-branch" ? (
@@ -143,7 +161,7 @@ export function BranchRow({ entry, overview, value, disabled, favourite, onSelec
       </ContextMenuContent>
     </ContextMenu>
   );
-}
+});
 
 function TrackingBadge({ branch }: { branch: LocalBranch }) {
   if (branch.worktreePath !== null) {

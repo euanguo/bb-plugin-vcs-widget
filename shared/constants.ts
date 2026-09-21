@@ -138,26 +138,6 @@ export const MIN_GIT_VERSION = { major: 2, minor: 24 } as const;
 export const DIFF_PATCH_MAX_PATHS_PER_REQUEST = 50;
 
 /**
- * How far past the viewport a diff card is read for. This margin *is* the
- * read-ahead: everything the observer reports inside it is asked for, and
- * nothing outside it is, so the set of paths one open can request is bounded
- * by the viewport plus this band rather than by the size of the change set.
- * Was 200px, which read barely past the fold; widening it here replaced the
- * separate unbounded "overscan" list that used to carry the read-ahead.
- */
-export const PATCH_ROOT_MARGIN = "600px 0px";
-
-/**
- * How long a pane resize has to be quiet before the diff content is allowed to
- * lay itself out again. A wrapping diff is laid out as a grid whose columns
- * span every row, so each width change makes the browser re-wrap all of it and
- * re-solve that grid — measured at about 180ms a frame, against 0-1ms with
- * `overflow: scroll`. Pinning the content width for the length of a drag turns
- * that into one relayout when the drag ends.
- */
-export const DIFF_WRAP_PIN_SETTLE_MS = 160;
-
-/**
  * How long a repository read stays good enough to paint from. Reopening the
  * popup inside this window shows the overview already in hand instead of
  * waiting on a host round trip; `changed` signals and a reconnect still force

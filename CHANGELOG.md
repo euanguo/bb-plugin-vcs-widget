@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.9.0 (2026-09-21)
+
+The diff stream is windowed by a library instead of by hand, and the width pin
+that milestone 8 added to buy a resize back is gone.
+
+- `ContinuousDiffStream` is windowed by `@tanstack/react-virtual`, the same
+  library the bb host uses for its own diff panel. The stream's rows have no
+  fixed height — a file row is a header plus a diff of however many lines it
+  renders — which is why it kept its own scheme before: every row's shell stayed
+  in the DOM and the expensive diff renderer was swapped for a spacer of the
+  height it had last measured. That put an `IntersectionObserver` and a
+  `ResizeObserver` on every row and made the scrollbar lie until every row had
+  been on screen. The library measures each row as it is rendered and keeps the
+  arithmetic honest, so what is mounted and what is read are both bounded by the
+  viewport rather than by the size of the change set.
+- Dragging the splitter no longer stops the diff content at the width it began
+  on. Milestone 8 pinned the column for the length of a resize because a
+  wrapping diff re-wraps itself on every width change (~180ms a frame), which
+  made the drag itself feel broken. The pin is gone: the window is what keeps
+  the frames short now, and the content follows the pointer.
+- A rename is read by both of its paths, a file list click scrolls the stream
+  through the library rather than through `scrollIntoView`, and a collapsed row
+  is its header alone. `shared/row-height.ts` holds the per-row estimate the
+  window starts from; `shared/diff-height.ts` is gone, its constants folded in.
+
 ## 0.8.0 (2026-09-20)
 
 One milestone, and it is about cost rather than capability: what the branch

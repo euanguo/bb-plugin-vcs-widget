@@ -355,11 +355,18 @@ try {
 
     const box = resizer.getBoundingClientRect();
     const y = box.y + 300;
-    const target = box.x + 40;
+    // The diff content's own width at every width the drag passes through. The
+    // pane's width is written straight to the DOM on each move, so a diff that
+    // is not pinned tracks it exactly: the reader sees the content follow the
+    // pointer. A pinned diff stops at the width the drag began on instead,
+    // which is what the previous implementation did.
+    const column = document.querySelector('[data-testid="vcs-stream-column"]');
+    const content = [];
     resizer.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: box.x, clientY: y }));
     for (let step_ = 1; step_ <= 20; step_ += 1) {
       window.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: box.x + step_ * 2, clientY: y }));
       await new Promise((done) => setTimeout(done, 30));
+      content.push(column === null ? null : Math.round(column.getBoundingClientRect().width));
     }
     const duringDrag = pane.style.width;
     window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
@@ -367,12 +374,16 @@ try {
     running = false;
     observer.disconnect();
     Storage.prototype.setItem = setItem;
-    void target;
     const sorted = [...frames].sort((a, b) => b - a);
+    // How many of the drag's steps moved the content's own width. Every one of
+    // them should: a content width that stands still is a pinned one.
+    const movedContent = content.filter((value, index) => index === 0 || value !== content[index - 1]).length;
     return {
       writes,
       duringDrag,
       afterDrag: pane.style.width,
+      contentSteps: content.length,
+      movedContent,
       frames: frames.length,
       avgFrame: Math.round(frames.reduce((total, value) => total + value, 0) / frames.length),
       maxFrame: sorted[0],
@@ -392,17 +403,25 @@ try {
     drag !== null && drag.writes === 1 && drag.duringDrag !== "" && drag.duringDrag === drag.afterDrag,
     drag === null ? "no resizer" : `${drag.writes} writes, "${drag.duringDrag}" during the drag, "${drag.afterDrag}" after`,
   );
+  step(
+    "M8-10b the diff content follows the drag instead of stopping at its start",
+    drag !== null && drag.movedContent === drag.contentSteps,
+    drag === null ? "no resizer" : `${drag.movedContent} of ${drag.contentSteps} drag steps moved the diff content's width`,
+  );
 
   // ------------------------------------------------- wrapping diffs resize --
   //
   // With `overflow: wrap` the renderer lays a diff out as a grid whose columns
   // span every row, so a width change makes the browser re-wrap the whole diff
   // and re-solve that grid: measured at about 180ms a frame against 0-1ms with
-  // scrolling lines, which is eleven seconds of work for a one-second drag. The
-  // plugin pins the content width for the length of a resize instead, so this
-  // step is what says the pin is still there. It only bites on a repository
-  // with a real diff in it, so on a small fixture it passes trivially — the
-  // numbers it prints are the point.
+  // scrolling lines. The plugin used to pin the content width for the length of
+  // a resize to buy that back, which made the drag itself feel broken: the
+  // content stopped following the pointer. It is a windowed stream now, so the
+  // number of diffs being laid out is bounded by the viewport rather than by
+  // the size of the change set, and this step says the content follows the
+  // drag and that the window keeps the frames short. It only bites on a
+  // repository with a real diff in it, so on a small fixture it passes
+  // trivially — the numbers it prints are the point.
   const wrapToggle = '[data-testid="vcs-diff-wrap"]';
   const wrapState = () => page.evaluate((selector) => document.querySelector(selector)?.getAttribute("aria-pressed") ?? null, wrapToggle);
   const wasWrapped = (await wrapState()) === "true";
@@ -422,13 +441,17 @@ try {
       observer.observe({ entryTypes: ["longtask"] });
     } catch {}
     const gaps = [];
-    let pinned = "";
+    // What the column's own inline style says at every width the drag passes
+    // through. An empty string is the answer that says nothing is pinned: the
+    // content is laid out at whatever width the pane currently has, so it
+    // follows the pointer instead of stopping at the width the drag began on.
+    const widths = [];
     let last = performance.now();
     for (let index = 0; index < 30; index += 1) {
       pane.style.width = `${base - index}px`;
       void document.body.offsetHeight;
-      if (index === 10) pinned = column.style.width;
       await new Promise((done) => requestAnimationFrame(done));
+      widths.push(column.style.width);
       const now = performance.now();
       gaps.push(Math.round(now - last));
       last = now;
@@ -443,14 +466,14 @@ try {
       over33: gaps.filter((value) => value > 33).length,
       totalMs: gaps.reduce((total, value) => total + value, 0),
       longTaskTotal: longTasks.reduce((total, value) => total + value, 0),
-      pinnedDuring: pinned,
-      releasedAfter: column.style.width,
+      pinnedAny: widths.filter((value) => value !== "").length,
+      afterResize: column.style.width,
     };
   });
   step(
-    "M8-11 a wrapping diff survives a pane resize",
-    wrapping.longTaskTotal < WRAP_RESIZE_LONG_TASK_BUDGET && wrapping.over33 <= 3,
-    `long tasks ${wrapping.longTaskTotal}ms, budget ${WRAP_RESIZE_LONG_TASK_BUDGET}ms; ${wrapping.over33} of 30 frames over 33ms; median ${wrapping.medianFrame}ms, worst ${wrapping.worstFrame}ms; pinned "${wrapping.pinnedDuring}" during, "${wrapping.releasedAfter}" after`,
+    "M8-11 a wrapping diff follows a pane resize instead of being pinned to it",
+    wrapping.pinnedAny === 0 && wrapping.longTaskTotal < WRAP_RESIZE_LONG_TASK_BUDGET && wrapping.over33 <= 3,
+    `nothing pinned across ${30 - wrapping.pinnedAny} of 30 widths (column style "${wrapping.afterResize}" after); long tasks ${wrapping.longTaskTotal}ms, budget ${WRAP_RESIZE_LONG_TASK_BUDGET}ms; ${wrapping.over33} of 30 frames over 33ms; median ${wrapping.medianFrame}ms, worst ${wrapping.worstFrame}ms`,
   );
   // Put the reader's preference back where it was found.
   if ((await wrapState()) === "true" && !wasWrapped) {

@@ -5,27 +5,30 @@
 //
 // A row is one file on one side: a header that stays put while its body
 // scrolls past, and a body that is either a diff, a notice (binary, too large,
-// not yet read) or nothing at all while collapsed. Both sides live in the one
-// stream: a file that is staged and edited again shows its staged change and
+// not yet read) or nothing at all while collapsed. Both sides live in the
+// one stream: a file that is staged and edited again shows its staged change and
 // its unstaged change as consecutive rows, so nothing needs a mode switch to
 // be seen. Staged comes first, which is the order git status reports.
+//
+// The rows are windowed by @tanstack/react-virtual, the same library the bb
+// host itself uses for its diff panel. It measures each row's real height as it
+// is rendered and keeps the arithmetic honest, which is what a stream of
+// variable-height diff cards needs: the previous hand-rolled scheme kept every
+// row's shell in the DOM and swapped the expensive diff renderer for a spacer
+// of the height it had last measured, which put an observer per row on the
+// main thread and made the scrollbar lie until every row had been on screen.
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEntry } from "../contracts";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@/lib/utils";
 import type { DiffChannel } from "../shared/target";
 import { DIFF_FILES_INLINE_PATCH_MAX_FILES } from "../shared/diff-tiering";
-import { DIFF_WRAP_PIN_SETTLE_MS, PATCH_ROOT_MARGIN } from "../shared/constants";
+import { previewableImageMime } from "../shared/constants";
+import { estimateRowHeight } from "../shared/row-height";
 import type { DiffPatchState, UseDiffPatchesResult } from "../hooks/use-diff-patches";
 import type { DiffContentsState, UseDiffContentsResult } from "../hooks/use-diff-contents";
-import { previewableImageMime } from "../shared/constants";
-import { patchRows } from "../shared/diff-quote";
-import {
-  estimateDiffBodyHeight,
-  IMAGE_BODY_HEIGHT_PX,
-  NOTICE_BODY_HEIGHT_PX,
-} from "../shared/diff-height";
 import { ImageDiffPreview } from "./ImageDiffPreview";
 import { PluginDiff } from "./PluginDiff";
 import { statusLetterClass } from "./status-letter";
@@ -37,6 +40,30 @@ export interface DiffStreamEntry {
   /** The tag the row wears — "Staged", "Unstaged" — or null for a target. */
   tag: string | null;
 }
+
+/** One row, placed: what to render and where it sits in the column. */
+interface PlacedRow {
+  entry: DiffStreamEntry;
+  /** The row's index in the stream, which is also its identity to the library. */
+  index: number;
+  /** The row's top edge, in the column's coordinates. */
+  top: number;
+  /** The row's height, so the column is as tall as the sum of its rows. */
+  height: number;
+}
+
+/**
+ * Rows painted before the scroll container has been measured.
+ *
+ * The library answers "what is near the reader" from the container's height,
+ * and a container nobody has measured is zero pixels tall, so its window is
+ * empty. That is right for a list that has not been laid out yet, and wrong
+ * for a stream that must show something on its first paint: jsdom measures
+ * nothing at all, and a real panel is briefly zero-tall before its first
+ * layout. So while the container is unmeasured the stream paints a first
+ * batch of rows instead of an empty column.
+ */
+const UNMEASURED_ROWS = 12;
 
 interface ContinuousDiffStreamProps {
   threadId: string;
@@ -50,8 +77,6 @@ interface ContinuousDiffStreamProps {
   /** Bumped whenever `changes` arrives, so stale patches are re-read. */
   filesUpdatedAt: unknown;
   isPanelOpen: boolean;
-  /** The panel's own splitter is being dragged, so pin before the first change. */
-  resizing?: boolean;
   /** Scroll here when the file list selects a path. */
   scrollToPath: string | null;
   onScrolledToPath: () => void;
@@ -65,26 +90,19 @@ interface ContinuousDiffStreamProps {
 /**
  * How far past the viewport a card is still mounted. A mounted card is the
  * expensive one — the renderer builds a shadow-DOM tree of every changed line —
- * so the stream mounts the cards near the reader and replaces the rest with a
- * spacer of the height they measured last time they were on screen.
+ * so the stream mounts the cards near the reader and leaves the rest out of the
+ * DOM entirely.
  *
- * The margin is deliberately generous. Unmounting and remounting a card costs
- * a re-parse, and the host's highlighter cache only makes that cheap, not free,
- * so a card the reader scrolls back over should still be there.
+ * This is expressed in rows rather than pixels, because the virtualizer's
+ * window is in rows: two rows either side of a screenful is a read-ahead a
+ * fast flick cannot outrun, and it bounds how many cards are ever mounted by
+ * the viewport rather than by the size of the change set.
  */
-const MOUNT_ROOT_MARGIN = "800px 0px";
+const MOUNT_OVERSCAN_ROWS = 2;
 
 /** A row is one file on one channel; the same path can hold two rows. */
 export function streamRowKey(item: DiffStreamEntry): string {
   return `${item.entry.path}:${item.channel}`;
-}
-
-/** The same key, read back off a row element by the observers. */
-function elementKey(element: HTMLElement): string | null {
-  const path = element.dataset.path;
-  const channel = element.dataset.channel;
-  if (path === undefined || channel === undefined) return null;
-  return `${path}:${channel}`;
 }
 
 export function ContinuousDiffStream({
@@ -95,7 +113,6 @@ export function ContinuousDiffStream({
   wrap,
   filesUpdatedAt,
   isPanelOpen,
-  resizing = false,
   scrollToPath,
   onScrolledToPath,
   collapsed,
@@ -104,8 +121,6 @@ export function ContinuousDiffStream({
   className,
 }: ContinuousDiffStreamProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const columnRef = useRef<HTMLDivElement | null>(null);
-  const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // The readers a row reaches through. Kept behind refs so the handles handed
   // to a row keep their identity: a fresh closure per render would defeat the
   // row's memo, and then one patch landing would re-render all of them.
@@ -123,14 +138,6 @@ export function ContinuousDiffStream({
     (channel: DiffChannel, path: string) => latestReaders.current.patches[channel].retry(path),
     [],
   );
-  const registerRef = useCallback((key: string, element: HTMLDivElement | null) => {
-    if (element === null) rowRefs.current.delete(key);
-    else rowRefs.current.set(key, element);
-  }, []);
-  // The rows whose diff renderer is mounted. `null` means "mount everything",
-  // which is what an environment without IntersectionObserver gets: better a
-  // heavy stream than an empty one.
-  const [mounted, setMounted] = useState<ReadonlySet<string> | null>(null);
 
   // The distinct files, for the prune calls and the summary line.
   //
@@ -180,9 +187,77 @@ export function ContinuousDiffStream({
     for (const channel of channels) latestReaders.current.contents[channel]?.invalidate();
   }, [filesUpdatedAt, channels]);
 
-  // Only what is on screen, plus the margin the observer is given, is asked
+  // The window itself. The estimate per row is the change size git reported,
+  // which is what the row already knows before its diff has been read; the
+  // library replaces it with the measured height as each row is rendered.
+  //
+  // `getItemKey` keeps a row's identity its `path:channel`, so a re-order of
+  // the list moves the row rather than rebuilding it.
+  //
+  // Each row's first guess at its height, from what the row already knows
+  // before its diff has been read. The library replaces it with the row's
+  // measured height as the row is rendered, so this only places the rows the
+  // library has not measured yet.
+  const estimateRowHeightAt = useCallback(
+    (index: number) => {
+      const item = entries[index];
+      if (item === undefined) return 0;
+      const { entry } = item;
+      const patchState = patches[item.channel].getPatchState(entry.path);
+      return estimateRowHeight({
+        collapsed: collapsed.has(streamRowKey(item)),
+        changedLines: entry.additions !== null && entry.deletions !== null ? entry.additions + entry.deletions : null,
+        binary: entry.kind !== "tracked" || patchState.binary === true,
+        image: previewableImageMime(entry.path) !== null || previewableImageMime(entry.oldPath) !== null,
+      });
+    },
+    [entries, patches, collapsed],
+  );
+  const virtualizer = useVirtualizer<HTMLDivElement, HTMLElement>({
+    count: entries.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: estimateRowHeightAt,
+    getItemKey: (index) => streamRowKey(entries[index]!),
+    overscan: MOUNT_OVERSCAN_ROWS,
+    enabled: isPanelOpen,
+  });
+  /** The window the library has settled on: what is near the reader. */
+  const items = virtualizer.getVirtualItems();
+
+  /**
+   * The rows to paint, each with the top edge it has been placed at.
+   *
+   * While the scroll container is unmeasured the library's window is empty,
+   * and these are the first rows instead, laid out from their estimates. Once
+   * the container is measured the library's own window is the answer and it
+   * carries the measured heights, so this is only the standing start.
+   */
+  const placed = useMemo<readonly PlacedRow[]>(() => {
+    if (items.length > 0) {
+      return items.map((item) => ({
+        entry: entries[item.index]!,
+        index: item.index,
+        top: item.start,
+        height: item.size,
+      }));
+    }
+    const first: PlacedRow[] = [];
+    let top = 0;
+    for (let index = 0; index < Math.min(entries.length, UNMEASURED_ROWS); index += 1) {
+      const height = estimateRowHeightAt(index);
+      first.push({ entry: entries[index]!, index, top, height });
+      top += height;
+    }
+    return first;
+  }, [items, entries, estimateRowHeightAt]);
+
+  const last = placed.length === 0 ? null : placed[placed.length - 1]!;
+  /** How tall the column is: the sum of every row, measured or estimated. */
+  const columnHeight = virtualizer.getTotalSize() > 0 ? virtualizer.getTotalSize() : last === null ? 0 : last.top + last.height;
+
+  // Only what is on screen, plus the margin the virtualizer is given, is asked
   // for. The margin is the read-ahead: it used to be a separate list of every
-  // row that was *not* on screen, which is bounded by the size of the change
+  // row that was *not* on screen, which was bounded by the size of the change
   // set rather than by the viewport, so opening a four-hundred-file worktree
   // could ask the host for all four hundred at once.
   //
@@ -191,8 +266,6 @@ export function ContinuousDiffStream({
   // than nothing at all.
   useEffect(() => {
     if (!isPanelOpen) return;
-    const container = scrollRef.current;
-    if (container === null) return;
     /** A rename is read by both of its paths; git reports neither alone. */
     const withRenames = (list: readonly string[]) =>
       [...new Set(list.flatMap((path) => (oldPathByPath.has(path) ? [path, oldPathByPath.get(path)!] : [path])))];
@@ -211,146 +284,30 @@ export function ContinuousDiffStream({
       ask(first);
       return;
     }
-    const observer = new IntersectionObserver(
-      (observed) => {
-        const visible: Record<string, string[]> = {};
-        for (const record of observed) {
-          if (!record.isIntersecting) continue;
-          const element = record.target as HTMLElement;
-          const path = element.dataset.path;
-          const channel = element.dataset.channel;
-          if (path === undefined || channel === undefined) continue;
-          (visible[channel] ??= []).push(path);
-        }
-        // Anything already loaded stays loaded; the hook filters.
-        ask(visible);
-      },
-      { root: container, rootMargin: PATCH_ROOT_MARGIN },
-    );
-    for (const element of rowRefs.current.values()) observer.observe(element);
-    return () => observer.disconnect();
-  }, [entries, channels, isPanelOpen, oldPathByPath]);
-
-  // The mount window. Separate from the reader above because it answers a
-  // different question — "is this card close enough to keep rendered?" — with a
-  // much wider margin than "is this file worth reading yet?".
-  useEffect(() => {
-    if (!isPanelOpen) return;
-    const container = scrollRef.current;
-    if (container === null) return;
-    if (typeof IntersectionObserver === "undefined") {
-      setMounted(null);
-      return;
+    // The rows the window has mounted, which is exactly the set the observer
+    // would have reported. Reading the virtualizer here rather than re-
+    // observing every row is what removes the per-row observer: the window is
+    // already the answer to "what is near the reader".
+    // The rows actually painted, which while the container is unmeasured are
+    // the first batch rather than the library's window.
+    const visible: Record<string, string[]> = {};
+    for (const item of placed) {
+      (visible[item.entry.channel] ??= []).push(item.entry.entry.path);
     }
-    const keys = new Set(entries.map(streamRowKey));
-    const observer = new IntersectionObserver(
-      (observed) => {
-        setMounted((previous) => {
-          // A file that left the list takes its row with it.
-          const next = new Set<string>();
-          for (const key of previous ?? []) if (keys.has(key)) next.add(key);
-          for (const record of observed) {
-            const key = elementKey(record.target as HTMLElement);
-            if (key === null) continue;
-            if (record.isIntersecting) next.add(key);
-            else next.delete(key);
-          }
-          return next;
-        });
-      },
-      { root: container, rootMargin: MOUNT_ROOT_MARGIN },
-    );
-    for (const element of rowRefs.current.values()) observer.observe(element);
-    return () => observer.disconnect();
-  }, [entries, isPanelOpen]);
+    ask(visible);
+  }, [placed, entries, channels, isPanelOpen, oldPathByPath]);
 
-  // The pane is being resized, and a wrapping diff is expensive to resize.
-  //
-  // With `overflow: wrap` the renderer lays a diff out as a grid whose two
-  // columns each span every row, so a width change makes the browser re-wrap
-  // the whole diff and re-solve that grid. Measured on a 2000px card: about
-  // 180ms a frame, 59 of 60 frames over 33ms, and eleven seconds of work for a
-  // one-second animation. The same change with `overflow: scroll` costs 0-1ms,
-  // because nothing re-wraps.
-  //
-  // The library offers nothing for it — its ResizeManager only writes column
-  // width variables — so the content is pinned instead: while the pane is
-  // resized, the column keeps the width it had at rest, so there is nothing to
-  // re-wrap, and it is released once the resize settles. One relayout at the
-  // end of a drag instead of one per frame. Only in wrap mode: with scroll the
-  // content follows the drag exactly as before, at no cost.
-  const entriesEmpty = entries.length === 0;
-  useEffect(() => {
-    if (!wrap || entriesEmpty) return;
-    const container = scrollRef.current;
-    const column = columnRef.current;
-    if (container === null || column === null) return;
-    let settled = Math.round(container.getBoundingClientRect().width);
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const pin = (width: number) => {
-      column.style.width = `${width}px`;
-      column.style.minWidth = `${width}px`;
-    };
-    const release = () => {
-      column.style.width = "";
-      column.style.minWidth = "";
-    };
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver((observed) => {
-      const entry = observed[observed.length - 1];
-      if (entry === undefined) return;
-      const width = Math.round(entry.contentRect.width);
-      if (resizing) {
-        // The panel's own splitter pins before the first change reaches this
-        // observer, and owns the release. All this has to do is keep track of
-        // where the drag has got to, so that releasing does not snap the
-        // content back to the width the drag started at.
-        settled = width;
-        return;
-      }
-      if (width !== settled) pin(settled);
-      if (timer !== null) clearTimeout(timer);
-      timer = setTimeout(() => {
-        timer = null;
-        release();
-        settled = Math.round(container.getBoundingClientRect().width);
-      }, DIFF_WRAP_PIN_SETTLE_MS);
-    });
-    observer.observe(container);
-    return () => {
-      observer.disconnect();
-      if (timer !== null) clearTimeout(timer);
-      release();
-    };
-  }, [wrap, entriesEmpty, resizing]);
-
-  // A resize this stream is driving itself starts here, before the first width
-  // change has been laid out — a resize the observer sees has already been paid
-  // for once, which is the frame the drag begins on.
-  useEffect(() => {
-    if (!wrap || !resizing || entriesEmpty) return;
-    const container = scrollRef.current;
-    const column = columnRef.current;
-    if (container === null || column === null) return;
-    const width = Math.round(container.getBoundingClientRect().width);
-    column.style.width = `${width}px`;
-    column.style.minWidth = `${width}px`;
-    return () => {
-      column.style.width = "";
-      column.style.minWidth = "";
-    };
-  }, [wrap, resizing, entriesEmpty]);
-
+  // A file-list click scrolls the stream to that file's first row. Done
+  // through the virtualizer rather than `scrollIntoView`, which would scroll
+  // the row's own container and, with a windowed stream, the row that is
+  // asked for is the one that has just been rendered for it.
   useEffect(() => {
     if (scrollToPath === null) return;
-    // A file with two rows scrolls to its first one.
-    const first = entries.find((item) => item.entry.path === scrollToPath);
-    if (first === undefined) return;
-    const element = rowRefs.current.get(streamRowKey(first));
-    if (element === undefined) return;
-    element.scrollIntoView({ block: "start" });
+    const index = entries.findIndex((item) => item.entry.path === scrollToPath);
+    if (index < 0) return;
+    virtualizer.scrollToIndex(index, { align: "start" });
     onScrolledToPath();
-  }, [scrollToPath, entries, onScrolledToPath]);
+  }, [scrollToPath, entries, virtualizer, onScrolledToPath]);
 
   if (entries.length === 0) {
     return (
@@ -363,27 +320,38 @@ export function ContinuousDiffStream({
   return (
     <div className={cn("flex min-h-0 flex-1 flex-col", className)}>
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto" data-testid="vcs-stream">
-        {/* The column a resize pins: see the pin effect above. */}
-        <div ref={columnRef} className="flex min-w-0 flex-col" data-testid="vcs-stream-column">
-          {entries.map((item) => {
-            const key = streamRowKey(item);
+        {/* The one box that holds the window's rows, sized to the sum of every
+            row's measured or estimated height so the scrollbar is honest. */}
+        <div className="relative w-full" style={{ height: columnHeight }} data-testid="vcs-stream-column">
+          {placed.map((item) => {
+            const row = item.entry;
+            const key = streamRowKey(row);
             return (
-              <DiffStreamRowItem
+              <div
                 key={key}
-                threadId={threadId}
-                item={item}
-                patchState={patches[item.channel].getPatchState(item.entry.path)}
-                contentsState={contents[item.channel].getContents(item.entry.path)}
-                isCollapsed={collapsed.has(key)}
-                isMounted={mounted === null || mounted.has(key)}
-                wrap={wrap}
-                onOpenFile={onOpenFile}
-                onToggleCollapsed={onToggleCollapsed}
-                registerRef={registerRef}
-                requestContents={requestContents}
-                loadPatch={loadPatch}
-                retryPatch={retryPatch}
-              />
+                ref={virtualizer.measureElement}
+                className="absolute left-0 w-full"
+                style={{ top: item.top }}
+                data-index={item.index}
+                data-path={row.entry.path}
+                data-channel={row.channel}
+              >
+                <DiffStreamRow
+                  threadId={threadId}
+                  entry={row.entry}
+                  channel={row.channel}
+                  tag={row.tag}
+                  patchState={patches[row.channel].getPatchState(row.entry.path)}
+                  contentsState={contents[row.channel].getContents(row.entry.path)}
+                  isCollapsed={collapsed.has(key)}
+                  wrap={wrap}
+                  onOpenFile={onOpenFile}
+                  onToggleCollapsed={() => onToggleCollapsed(key)}
+                  onRequestContents={() => requestContents(row.channel, row.entry.path, row.entry.oldPath)}
+                  onLoadPatch={() => loadPatch(row.channel, row.entry.path)}
+                  onRetry={() => retryPatch(row.channel, row.entry.path)}
+                />
+              </div>
             );
           })}
         </div>
@@ -403,47 +371,13 @@ interface DiffStreamRowProps {
   contentsState: DiffContentsState;
   onRequestContents: () => void;
   isCollapsed: boolean;
-  /** Whether this row's diff renderer is close enough to the viewport to mount. */
-  isMounted: boolean;
   onToggleCollapsed: () => void;
   onLoadPatch: () => void;
   onRetry: () => void;
   onOpenFile?: (path: string) => void;
   /** Whether a long line wraps instead of scrolling sideways. */
   wrap: boolean;
-  registerRef: (element: HTMLDivElement | null) => void;
 }
-
-/** The first guess at a row's body height, for a card never yet measured. */
-function estimateBodyHeight(entry: ChangeEntry, patchState: DiffPatchState): number {
-  if (patchState.status === "loaded" && patchState.binary === true) {
-    const mimeType = previewableImageMime(entry.path) ?? previewableImageMime(entry.oldPath);
-    return mimeType === null ? NOTICE_BODY_HEIGHT_PX : IMAGE_BODY_HEIGHT_PX;
-  }
-  if (patchState.status === "loaded" && patchState.patch !== undefined && patchState.patch.trim() !== "") {
-    const rows = patchRows(patchState.patch).length;
-    if (rows > 0) return estimateDiffBodyHeight(rows);
-  }
-  return NOTICE_BODY_HEIGHT_PX;
-}
-
-const STATUS_LETTER: Record<string, string> = {
-  M: "M",
-  T: "T",
-  R: "R",
-  A: "A",
-  C: "C",
-  D: "D",
-  "?": "?",
-  U: "U",
-};
-
-function statusLetter(entry: ChangeEntry): string {
-  if (entry.kind === "untracked") return "?";
-  if (entry.kind === "conflicted") return "U";
-  return STATUS_LETTER[entry.worktree !== "." ? entry.worktree : entry.index] ?? "M";
-}
-
 
 /**
  * One row, wired to the readers.
@@ -453,72 +387,7 @@ function statusLetter(entry: ChangeEntry): string {
  * row's own channel and path. Without this, one patch landing replaced the
  * closure of every other row and re-rendered the whole column.
  */
-interface DiffStreamRowItemProps {
-  threadId: string;
-  item: DiffStreamEntry;
-  patchState: DiffPatchState;
-  contentsState: DiffContentsState;
-  isCollapsed: boolean;
-  isMounted: boolean;
-  wrap: boolean;
-  onOpenFile?: (path: string) => void;
-  onToggleCollapsed: (key: string) => void;
-  registerRef: (key: string, element: HTMLDivElement | null) => void;
-  requestContents: (channel: DiffChannel, path: string, oldPath: string | null) => void;
-  loadPatch: (channel: DiffChannel, path: string) => void;
-  retryPatch: (channel: DiffChannel, path: string) => void;
-}
-
-const DiffStreamRowItem = memo(function DiffStreamRowItem({
-  threadId,
-  item,
-  patchState,
-  contentsState,
-  isCollapsed,
-  isMounted,
-  wrap,
-  onOpenFile,
-  onToggleCollapsed,
-  registerRef,
-  requestContents,
-  loadPatch,
-  retryPatch,
-}: DiffStreamRowItemProps) {
-  const { entry, channel, tag } = item;
-  const key = streamRowKey(item);
-  const handleToggleCollapsed = useCallback(() => onToggleCollapsed(key), [onToggleCollapsed, key]);
-  const handleRequestContents = useCallback(
-    () => requestContents(channel, entry.path, entry.oldPath),
-    [requestContents, channel, entry.path, entry.oldPath],
-  );
-  const handleLoadPatch = useCallback(() => loadPatch(channel, entry.path), [loadPatch, channel, entry.path]);
-  const handleRetry = useCallback(() => retryPatch(channel, entry.path), [retryPatch, channel, entry.path]);
-  const handleRef = useCallback(
-    (element: HTMLDivElement | null) => registerRef(key, element),
-    [registerRef, key],
-  );
-  return (
-    <DiffStreamRow
-      threadId={threadId}
-      entry={entry}
-      channel={channel}
-      tag={tag}
-      patchState={patchState}
-      contentsState={contentsState}
-      onRequestContents={handleRequestContents}
-      isCollapsed={isCollapsed}
-      isMounted={isMounted}
-      onToggleCollapsed={handleToggleCollapsed}
-      onLoadPatch={handleLoadPatch}
-      onRetry={handleRetry}
-      onOpenFile={onOpenFile}
-      wrap={wrap}
-      registerRef={handleRef}
-    />
-  );
-});
-
-function DiffStreamRow({
+const DiffStreamRow = memo(function DiffStreamRow({
   threadId,
   entry,
   channel,
@@ -527,48 +396,19 @@ function DiffStreamRow({
   contentsState,
   onRequestContents,
   isCollapsed,
-  isMounted,
   onToggleCollapsed,
   onLoadPatch,
   onRetry,
   onOpenFile,
   wrap,
-  registerRef,
 }: DiffStreamRowProps) {
   const label = entry.oldPath === null || entry.oldPath === entry.path ? entry.path : `${entry.oldPath} -> ${entry.path}`;
   const letter = statusLetter(entry);
-
-  // The height this row's body measured the last time it was mounted, so the
-  // spacer that replaces it holds the same space. `estimatedBodyHeight` is only
-  // the first guess, for a card that has never been on screen.
-  const bodyRef = useRef<HTMLDivElement | null>(null);
-  const measuredHeightRef = useRef<number | null>(null);
-  const estimatedBodyHeight = useMemo(() => estimateBodyHeight(entry, patchState), [entry, patchState]);
-
-  // Measure only while the body is mounted. The observer is torn down when the
-  // row leaves the window, so the spacer cannot overwrite the number that
-  // decided how tall the spacer should be.
-  useEffect(() => {
-    const element = bodyRef.current;
-    if (!isMounted || isCollapsed || element === null) return;
-    if (typeof ResizeObserver === "undefined") {
-      measuredHeightRef.current = element.getBoundingClientRect().height;
-      return;
-    }
-    const observer = new ResizeObserver((observed) => {
-      for (const record of observed) measuredHeightRef.current = record.contentRect.height;
-    });
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [isMounted, isCollapsed]);
-
   return (
     <section
-      ref={registerRef}
-      data-path={entry.path}
+      className="min-w-0 border-b border-border/60"
       data-channel={channel}
       data-testid={`vcs-stream-row-${entry.path}-${channel}`}
-      className="min-w-0 border-b border-border/60 last:border-b-0"
     >
       <header className="flex min-w-0 items-center gap-2 border-b border-border/60 px-3 py-1.5">
         <Button
@@ -609,30 +449,38 @@ function DiffStreamRow({
         ) : null}
       </header>
       {isCollapsed ? null : (
-        <div ref={bodyRef}>
-          {isMounted ? (
-            <DiffStreamBody
-              threadId={threadId}
-              entry={entry}
-              channel={channel}
-              patchState={patchState}
-              contentsState={contentsState}
-              onRequestContents={onRequestContents}
-              onLoadPatch={onLoadPatch}
-              onRetry={onRetry}
-              onOpenFile={onOpenFile}
-              wrap={wrap}
-            />
-          ) : (
-            <div
-              style={{ height: measuredHeightRef.current ?? estimatedBodyHeight }}
-              data-testid={`vcs-stream-spacer-${entry.path}-${channel}`}
-            />
-          )}
-        </div>
+        <DiffStreamBody
+          threadId={threadId}
+          entry={entry}
+          channel={channel}
+          patchState={patchState}
+          contentsState={contentsState}
+          onRequestContents={onRequestContents}
+          onLoadPatch={onLoadPatch}
+          onRetry={onRetry}
+          onOpenFile={onOpenFile}
+          wrap={wrap}
+        />
       )}
     </section>
   );
+});
+
+const STATUS_LETTER: Record<string, string> = {
+  M: "M",
+  T: "T",
+  R: "R",
+  A: "A",
+  C: "C",
+  D: "D",
+  "?": "?",
+  U: "U",
+};
+
+function statusLetter(entry: ChangeEntry): string {
+  if (entry.kind === "untracked") return "?";
+  if (entry.kind === "conflicted") return "U";
+  return STATUS_LETTER[entry.worktree !== "." ? entry.worktree : entry.index] ?? "M";
 }
 
 const NOTICE_CLASS = "flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-3 text-xs text-muted-foreground";

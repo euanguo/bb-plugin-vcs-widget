@@ -135,14 +135,24 @@ app.tsx (browser) --useRpc(rpcContract, keyed by threadId)--> server.ts (bb serv
   `aria-activedescendant` rather than driving the `value` prop, which would
   move the highlight without updating the store's `selectedItemId`. The file
   list is flattened the same way (`flattenChangeTree` / `flattenChangeGroups`)
-  and `views/ChangeList.tsx` windows it. A wrapping diff is the one thing that
-  does not follow a resize cheaply: `overflow: wrap` makes the renderer lay the
-  diff out as a grid whose columns span every row, so each width change
-  re-wraps all of it (~180ms a frame against 0-1ms scrolling, and the library
-  offers no option for it), so `ContinuousDiffStream` pins its column to the
-  width it had at rest for the length of a resize and releases it when the
-  resize settles — driven by the panel's own `resizing` flag when ours started
-  it, and by its own ResizeObserver for a resize we did not. `components/ui/context-menu.tsx` ignores
+  and `views/ChangeList.tsx` windows it. `ContinuousDiffStream` is the one
+  list whose rows have no fixed height — a file row is a header plus a diff of
+  however many lines it renders — so it is windowed by
+  `@tanstack/react-virtual`, the same library the bb host uses for its own diff
+  panel: rows are absolutely positioned inside one container the library
+  sizes, each row is measured as it is rendered (`measureElement`) and its
+  measured height replaces the estimate `shared/row-height.ts` gave it, and
+  the rows the window holds are exactly the ones the patch readers ask for, so
+  both what is mounted and what is read are bounded by the viewport rather
+  than by the size of the change set. The library reads its window off the
+  scroll container's height, and an unmeasured container is zero pixels tall,
+  so the stream paints its first `UNMEASURED_ROWS` rows from their estimates
+  until a measurement lands — that is the jsdom case and the first paint both.
+  A wrapping diff re-wraps itself on every width change (~180ms a frame
+  against 0-1ms scrolling, and the renderer offers no option for it); the
+  window is what keeps that affordable, and nothing is pinned to buy it back,
+  because a pinned column stops following the pointer and the drag feels
+  broken. `components/ui/context-menu.tsx` ignores
   the pointerup that opened a menu: Radix clicks an item it saw no
   pointerdown on, so a menu shifted over the pointer would run that row.
 - Pure, DOM-free logic in `shared/` with fixture tests. `shared/constants.ts`

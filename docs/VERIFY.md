@@ -348,6 +348,12 @@ re-wrapping that diff. It turns the wrap toggle on for the length of the check
 and puts the reader's preference back afterwards, and it prints the numbers
 either way.
 
+Step 10b is the one that says the diff content follows the drag. It reads the
+content column's own width at every step of a twenty-step splitter drag and
+reports how many of those steps moved it. Every one of them should: a content
+width that stands still is a pinned one, which is what made the drag feel
+broken before the stream was windowed.
+
 No step clicks a branch row, stages a file or commits. It measures by reading
 the DOM and by timing work in the page itself: one `PerformanceObserver` per
 stretch of interaction and a `requestAnimationFrame` loop for frames, with the
@@ -370,6 +376,17 @@ files) on 2026-09-18, before and after the windowing:
 | storage writes in that drag | one per pointermove | 1 | 1 |
 | average frame during that drag | 70 ms | 17 ms | — |
 
+And against the same repository after the stream was windowed by
+`@tanstack/react-virtual` (2026-09-21), with the pin removed:
+
+| | windowed stream | budget |
+|---|---|---|
+| nodes in the commit panel | 628 | 6 000 |
+| diff bodies mounted | 4 | 60 |
+| drag steps that moved the diff content's width | 20 of 20 | 20 of 20 |
+| a wrapping diff, frames over 33 ms | 0 of 30 | 3 of 30 |
+| a wrapping diff, long tasks | 0 ms | 1 200 ms |
+
 And the one that is not about this change at all, found afterwards by reading
 the report of a reader whose diff is 2000px tall: **a width change with
 `overflow: wrap` costs about 180 ms** against 0-1 ms with `overflow: scroll`.
@@ -385,10 +402,16 @@ variables). Sixty width changes, no input involved:
 | total | 10 913 ms | 1 298 ms |
 | long tasks | 33 390 ms | 431 ms |
 
-The plugin now pins the diff's own width for the length of a resize and releases
-it when the resize settles, so the content re-lays-out once at the end instead
-of once a frame. It applies only in wrap mode: with scrolling lines the content
-follows the drag exactly as it always did, at no cost.
+The plugin used to pin the diff's own width for the length of a resize and
+release it when the resize settled, so the content re-laid-out once at the end
+instead of once a frame. That traded one cost for a worse one: the content
+stopped following the pointer, so dragging the splitter looked broken. The pin
+is gone now. The stream is windowed by the same library the bb host uses for
+its own diff panel, which bounds how many diffs are mounted at all by the
+viewport rather than by the size of the change set, and that is what keeps the
+frames short without pinning anything. With scrolling lines the content follows
+the drag exactly as it always did, at no cost; with wrapping lines it follows
+the drag too, over a number of diffs the viewport puts a ceiling on.
 
 ## Last run
 

@@ -549,7 +549,6 @@ export function CommitPanel({ threadId }: PanelProps) {
             wrap={wrap}
             filesUpdatedAt={changesUpdatedAt}
             isPanelOpen
-            resizing={isResizing}
             scrollToPath={scrollToPath}
             onScrolledToPath={() => setScrollToPath(null)}
             collapsed={collapsedRows}

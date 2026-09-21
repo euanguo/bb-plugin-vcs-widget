@@ -27,7 +27,7 @@ function advanceClock(ms: number): void {
 import type { PluginThreadPanelProps } from "@get-bb/plugin-sdk/app";
 import type { ActionResult, ChangesResult, JobStart, LogCommit, Overview } from "./contracts";
 import type { JobKind } from "./shared/constants";
-import { CHANGE_LIST_ROW_HEIGHT, CHANGE_LIST_WINDOW_OVERSCAN, DIFF_WRAP_PIN_SETTLE_MS, PANE_WIDTH, PATCH_ROOT_MARGIN, POPUP_ROW_HEIGHT, POPUP_WINDOW_OVERSCAN } from "./shared/constants";
+import { CHANGE_LIST_ROW_HEIGHT, CHANGE_LIST_WINDOW_OVERSCAN, PANE_WIDTH, POPUP_ROW_HEIGHT, POPUP_WINDOW_OVERSCAN } from "./shared/constants";
 import { unavailableOverview } from "./contracts";
 import { requestOpen } from "./lib/events";
 import { clearOverviewCache } from "./shared/overview-cache";
@@ -1091,7 +1091,48 @@ describe("panels", () => {
 });
 
 describe("CommitPanel", () => {
+  /** A viewport the diff stream can be measured against. */
+  const STREAM_VIEWPORT_HEIGHT = 900;
+
   type CommitRpc = Record<string, (input: never) => unknown>;
+
+  /** A working tree with more files than any list should render at once. */
+  function manyFiles(count: number): ChangesResult {
+    // `ChangesResult` is the ok branch or a failure; this fixture is the ok one.
+    const readable = CHANGES as Extract<ChangesResult, { ok: true }>;
+    return {
+      ...readable,
+      files: [
+        ...Array.from({ length: count }, (_, index) => ({
+          path: `bulk/file-${String(index).padStart(4, "0")}.txt`,
+          oldPath: null,
+          index: ".",
+          worktree: "M",
+          kind: "tracked" as const,
+          additions: 1,
+          deletions: 0,
+        })),
+        { path: "other/one.txt", oldPath: null, index: ".", worktree: "M", kind: "tracked" as const, additions: 1, deletions: 0 },
+      ],
+    };
+  }
+
+  /**
+   * Give the diff stream's scroll container a height, which jsdom does not.
+   *
+   * The window is computed from the container's measured height, and jsdom
+   * measures nothing, so without this the library's window is empty and the
+   * stream falls back to its unmeasured first batch. `offsetHeight` is what
+   * the library reads, so that is the one stubbed here.
+   */
+  function installStreamViewport(): () => void {
+    const previous = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, get: () => STREAM_VIEWPORT_HEIGHT });
+    return () => {
+      if (previous === undefined) delete (HTMLElement.prototype as { offsetHeight?: unknown }).offsetHeight;
+      else Object.defineProperty(HTMLElement.prototype, "offsetHeight", previous);
+    };
+  }
 
   function renderCommitPanel(options: { changes?: ChangesResult; overview?: Overview; rpc?: CommitRpc } = {}) {
     const view = options.overview ?? overview();
@@ -1348,57 +1389,22 @@ describe("CommitPanel", () => {
     expect(slot.getByTestId("vcs-stream-patch-both.txt-worktree")).toBeTruthy();
   });
 
-  it("mounts only the cards near the viewport, and holds a far row's space with a spacer", async () => {
-    // jsdom has no IntersectionObserver, so the stream mounts every row. This
-    // stands in for a browser: the test says which rows are near the viewport.
-    class IntersectionObserverStub {
-      static readonly instances: IntersectionObserverStub[] = [];
-      readonly elements = new Set<Element>();
-      constructor(
-        private readonly callback: IntersectionObserverCallback,
-        readonly options?: IntersectionObserverInit,
-      ) {
-        IntersectionObserverStub.instances.push(this);
-      }
-      observe(element: Element) { this.elements.add(element); }
-      unobserve(element: Element) { this.elements.delete(element); }
-      disconnect() { this.elements.clear(); }
-      takeRecords() { return []; }
-      /** Report the targets `near` accepts as close by and the rest as far away. */
-      report(near: (element: HTMLElement) => boolean) {
-        const entries = [...this.elements].map((target) => {
-          const intersecting = near(target as HTMLElement);
-          return { target, isIntersecting: intersecting, intersectionRatio: intersecting ? 1 : 0 };
-        }) as IntersectionObserverEntry[];
-        act(() => this.callback(entries, this as unknown as IntersectionObserver));
-      }
-    }
-    Object.assign(globalThis, { IntersectionObserver: IntersectionObserverStub });
+  it("mounts only the rows the window holds, not the whole stream", async () => {
+    // The rows the library has placed are the ones in the DOM. With a measured
+    // viewport the window is a screenful plus its overscan either side, so a
+    // stream of a few hundred files never puts more than a handful in the DOM.
+    const restore = installStreamViewport();
     try {
-      const slot = renderCommitPanel();
-      await slot.findAllByTestId(/^vcs-stream-row-/u);
-      // The stream keeps one reader per concern, so the newest observer with
-      // each margin is the live one.
-      const newest = (rootMargin: string) =>
-        [...IntersectionObserverStub.instances]
-          .reverse()
-          .find((instance) => instance.options?.rootMargin === rootMargin);
-      const row = (element: HTMLElement) => ({ path: element.dataset.path, side: element.dataset.channel });
-      // Start with everything on screen: both sides of both.txt read and render.
-      newest(PATCH_ROOT_MARGIN)!.report(() => true);
-      newest("800px 0px")!.report(() => true);
-      await slot.findByTestId("vcs-stream-patch-both.txt-index");
-      await slot.findByTestId("vcs-stream-patch-both.txt-worktree");
-      // Now the reader scrolls until only one card is left nearby.
-      newest("800px 0px")!.report((element) => row(element).path === "both.txt" && row(element).side === "worktree");
-      // The card that scrolled away keeps its place: a spacer the height of its
-      // two changed lines, and no renderer behind it. The mounted card stays.
-      const spacer = await slot.findByTestId("vcs-stream-spacer-both.txt-index");
-      expect(spacer.style.height).toBe("44px");
-      expect(slot.queryByTestId("vcs-stream-patch-both.txt-index")).toBeNull();
-      expect(slot.getByTestId("vcs-stream-patch-both.txt-worktree")).toBeTruthy();
+      const slot = renderCommitPanel({ changes: manyFiles(200) });
+      const rows = await slot.findAllByTestId(/^vcs-stream-row-/u);
+      // Every row in the DOM is one the window placed, and the window is
+      // bounded by the viewport rather than by the size of the change set.
+      expect(rows.length).toBeLessThan(60);
+      // A file far down the stream is genuinely not mounted.
+      expect(slot.queryByTestId("vcs-stream-row-bulk/file-0150.txt-worktree")).toBeNull();
+      expect(slot.queryByTestId("vcs-stream-row-bulk/file-0000.txt-worktree")).toBeTruthy();
     } finally {
-      delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
+      restore();
     }
   });
 
@@ -1410,16 +1416,28 @@ describe("CommitPanel", () => {
    * width it had at rest while the pane is resized and released when the resize
    * settles. These lock that, and lock that the scrolling case is left alone.
    */
-  describe("the wrap pin", () => {
+  /**
+   * The diff content used to be pinned to the width it had at rest for the
+   * length of a pane resize, on the grounds that a wrapping diff re-wraps all
+   * of itself on every width change (~180ms a frame). The pin made the drag
+   * itself feel broken: the content stopped following the pointer. So the pin
+   * is gone. These lock that the content follows a resize instead, and that
+   * the diff renderer still hears the wrap option that makes it expensive.
+   */
+  describe("following a resize", () => {
     /** jsdom lays nothing out, so the stream is given a width the test controls. */
     function installWidth(width: number): { set: (next: number) => void; restore: () => void } {
       let current = width;
+      // jsdom has no PointerEvent, so a drag would lose its coordinates.
+      const pointerEvent = (globalThis as { PointerEvent?: unknown }).PointerEvent;
+      class PointerEventStub extends MouseEvent {}
+      Object.assign(globalThis, { PointerEvent: PointerEventStub });
       const bounds = Element.prototype.getBoundingClientRect;
       Element.prototype.getBoundingClientRect = function getBoundingClientRect(this: Element) {
         const isStream = (this as HTMLElement).dataset?.testid === "vcs-stream";
         return {
           x: 0, y: 0, top: 0, left: 0, bottom: 0, right: isStream ? current : 0,
-          width: isStream ? current : 0, height: 0, toJSON: () => ({}),
+          width: isStream ? current : 1, height: 0, toJSON: () => ({}),
         } as DOMRect;
       };
       return {
@@ -1428,6 +1446,8 @@ describe("CommitPanel", () => {
         },
         restore: () => {
           Element.prototype.getBoundingClientRect = bounds;
+          if (pointerEvent === undefined) delete (globalThis as { PointerEvent?: unknown }).PointerEvent;
+          else Object.assign(globalThis as { PointerEvent?: unknown }, pointerEvent);
         },
       };
     }
@@ -1468,7 +1488,7 @@ describe("CommitPanel", () => {
       Object.assign(globalThis, { ResizeObserver: ResizeObserverStub });
       return () => {
         if (previous === undefined) delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
-        else Object.assign(globalThis, { ResizeObserver: previous });
+        else Object.assign(globalThis as { ResizeObserver?: unknown }, previous);
       };
     }
 
@@ -1476,23 +1496,22 @@ describe("CommitPanel", () => {
     const column = (slot: { getByTestId: (id: string) => HTMLElement }) => slot.getByTestId("vcs-stream-column");
     const latest = () => [...ResizeObserverStub.instances].reverse()[0]!;
 
-    it("does not pin anything while long lines scroll", async () => {
+    it("pins nothing while long lines scroll", async () => {
       const layout = installWidth(600);
       const restoreObserver = installObserver();
       try {
         const slot = renderCommitPanel();
         await slot.findAllByTestId(/^vcs-stream-row-/u);
         latest().report(640);
-        // Nothing to save: a scrolling diff costs 0-1ms a width change, and its
-        // content follows the drag while it happens.
         expect(column(slot).style.width).toBe("");
+        expect(column(slot).style.minWidth).toBe("");
       } finally {
         layout.restore();
         restoreObserver();
       }
     });
 
-    it("holds a wrapping diff's width while the pane is resized, and lets go when it settles", async () => {
+    it("lets a wrapping diff follow the pane while it is being resized", async () => {
       wrapOn();
       const layout = installWidth(600);
       const restoreObserver = installObserver();
@@ -1501,27 +1520,21 @@ describe("CommitPanel", () => {
         await slot.findAllByTestId(/^vcs-stream-row-/u);
         expect(column(slot).style.width).toBe("");
 
-        layout.set(640);
-        latest().report(640);
-        // Pinned to where it was, so the renderer has nothing to re-wrap.
-        expect(column(slot).style.width).toBe("600px");
-        expect(column(slot).style.minWidth).toBe("600px");
+        // Every width the drag passes through is the one the content is laid
+        // out at, so it tracks the pointer instead of stopping at the width
+        // the drag began on.
+        for (const width of [640, 580, 520]) {
+          layout.set(width);
+          latest().report(width);
+          expect(column(slot).style.width).toBe("");
+          expect(column(slot).style.minWidth).toBe("");
+        }
 
-        // Still pinned while the drag continues.
-        layout.set(580);
-        latest().report(580);
-        expect(column(slot).style.width).toBe("600px");
-
-        // Quiet for the settle window: one relayout, at the width it landed on.
-        // Waited out rather than advanced: the settle is a real timer, and
-        // `advanceClock` only moves `Date.now()`.
+        // And there is no settle to wait for: the last width is simply the one
+        // it landed on.
         await act(async () => {
-          await new Promise((resolve) => setTimeout(resolve, DIFF_WRAP_PIN_SETTLE_MS + 40));
+          await new Promise((resolve) => setTimeout(resolve, 200));
         });
-        expect(column(slot).style.width).toBe("");
-
-        // And a resize back to where it settled has nothing to pin for.
-        latest().report(580);
         expect(column(slot).style.width).toBe("");
       } finally {
         layout.restore();
@@ -1529,7 +1542,27 @@ describe("CommitPanel", () => {
       }
     });
 
-    it("pins before the first width change when the panel's own splitter moves", async () => {
+    it("still hands the wrap option to the renderer while it follows", async () => {
+      wrapOn();
+      const layout = installWidth(600);
+      const restoreObserver = installObserver();
+      try {
+        const slot = renderCommitPanel();
+        const patch = await slot.findByTestId("vcs-stream-patch-both.txt-worktree");
+        const renderer = patch.querySelector("[data-overflow]")!;
+        layout.set(640);
+        latest().report(640);
+        // Wrapping is what the renderer is told, not something the frame
+        // around it decides, so the diff follows the resize as wrapped text.
+        expect(renderer.getAttribute("data-overflow")).toBe("wrap");
+        expect(column(slot).style.width).toBe("");
+      } finally {
+        layout.restore();
+        restoreObserver();
+      }
+    });
+
+    it("pins nothing when the panel's own splitter moves", async () => {
       wrapOn();
       const layout = installWidth(600);
       const restoreObserver = installObserver();
@@ -1538,11 +1571,12 @@ describe("CommitPanel", () => {
         await slot.findAllByText("staged.txt");
         const resizer = slot.getByTestId("vcs-file-list-resizer");
 
-        // A drag this panel started pins straight away: a resize the observer
-        // sees has already been laid out once, and that frame is the one the
-        // drag begins on.
+        // A drag this panel started used to pin the column before the first
+        // width change even landed. Now it is the pane that moves, and the
+        // diff content goes with it.
         fireEvent.pointerDown(resizer, { clientX: 1000 });
-        await waitFor(() => expect(column(slot).style.width).toBe("600px"));
+        fireEvent.pointerMove(window, { clientX: 800 });
+        await waitFor(() => expect(column(slot).style.width).toBe(""));
 
         fireEvent.pointerUp(window);
         await waitFor(() => expect(column(slot).style.width).toBe(""));
@@ -1750,25 +1784,6 @@ describe("CommitPanel", () => {
     const VIEWPORT_HEIGHT = CHANGE_LIST_ROW_HEIGHT * VIEWPORT_ROWS;
 
     /** A working tree with more files than any list should render at once. */
-    function manyFiles(count: number): ChangesResult {
-      // `ChangesResult` is the ok branch or a failure; this fixture is the ok one.
-      const readable = CHANGES as Extract<ChangesResult, { ok: true }>;
-      return {
-        ...readable,
-        files: [
-          ...Array.from({ length: count }, (_, index) => ({
-            path: `bulk/file-${String(index).padStart(4, "0")}.txt`,
-            oldPath: null,
-            index: ".",
-            worktree: "M",
-            kind: "tracked" as const,
-            additions: 1,
-            deletions: 0,
-          })),
-          { path: "other/one.txt", oldPath: null, index: ".", worktree: "M", kind: "tracked" as const, additions: 1, deletions: 0 },
-        ],
-      };
-    }
 
     /** Give every element a height and a scroll offset, which jsdom does not. */
     function installLayout(): () => void {
@@ -1920,57 +1935,32 @@ describe("CommitPanel", () => {
     });
 
     it("asks for the diffs near the reader, not for every row that is not", async () => {
-      class IntersectionObserverStub {
-        static readonly instances: IntersectionObserverStub[] = [];
-        readonly elements = new Set<Element>();
-        constructor(
-          private readonly callback: IntersectionObserverCallback,
-          readonly options?: IntersectionObserverInit,
-        ) {
-          IntersectionObserverStub.instances.push(this);
-        }
-        observe(element: Element) {
-          this.elements.add(element);
-        }
-        unobserve(element: Element) {
-          this.elements.delete(element);
-        }
-        disconnect() {
-          this.elements.clear();
-        }
-        takeRecords() {
-          return [];
-        }
-        report(near: (element: HTMLElement) => boolean) {
-          const entries = Array.from(this.elements).map((target) => {
-            const intersecting = near(target as HTMLElement);
-            return { target, isIntersecting: intersecting, intersectionRatio: intersecting ? 1 : 0 };
-          }) as IntersectionObserverEntry[];
-          act(() => this.callback(entries, this as unknown as IntersectionObserver));
-        }
-      }
-      Object.assign(globalThis, { IntersectionObserver: IntersectionObserverStub });
       const restore = installLayout();
       try {
         const slot = renderCommitPanel({ changes: manyFiles(400) });
         await slot.findAllByTestId(/^vcs-stream-row-/u);
-        const reader = IntersectionObserverStub.instances
-          .reverse()
-          .find((instance) => instance.options?.rootMargin === PATCH_ROOT_MARGIN)!;
-        // Three rows are near the reader; four hundred are not. The rows that
-        // are not used to be swept into the request as "overscan", so this is
-        // the difference between three paths and four hundred.
-        const near = new Set(["bulk/file-0000.txt", "bulk/file-0001.txt", "bulk/file-0002.txt"]);
-        reader.report((element) => near.has(element.dataset.path ?? ""));
         await waitFor(() => expect(batchCalls(slot).length).toBeGreaterThan(0));
+        // What is asked for is what the window has mounted: a screenful plus
+        // its overscan either side. The rows that are not used to be swept in
+        // as an unbounded "overscan" list, so this is the difference between
+        // a handful of paths and four hundred.
         const asked = batchCalls(slot).flatMap((call) => call.paths);
-        expect(asked.length).toBeLessThanOrEqual(near.size);
-        expect(new Set(asked)).toEqual(near);
+        expect(asked.length).toBeLessThan(50);
+        expect(new Set(asked).size).toBe(asked.length);
         // And every call is still within the host's per-call cap.
         for (const call of batchCalls(slot)) expect(call.paths.length).toBeLessThanOrEqual(50);
+        // The rows mounted are exactly the rows asked for: the window is what
+        // names them, and it names nothing it has not placed. The read is
+        // debounced, so the last call may name rows the window has since moved
+        // off; the union of what was asked is still bounded by the viewport.
+        const mounted = new Set(
+          Array.from(slot.getByTestId("vcs-stream").querySelectorAll<HTMLElement>("[data-path]")).map((row) => row.dataset.path!),
+        );
+        expect(mounted.size).toBeLessThan(50);
+        const askedButNeverMounted = [...new Set(asked)].filter((path) => !mounted.has(path));
+        expect(askedButNeverMounted.length).toBeLessThan(10);
       } finally {
         restore();
-        delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
       }
     });
   });
